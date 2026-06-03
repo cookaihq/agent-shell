@@ -1,0 +1,54 @@
+name: Release
+
+# 推送 v* tag 触发：mac/win runner 构建出包 → 上传到 GitHub Release。
+# 注：authored 于 M8e，真跑需镜像仓配好（owner/repo + 推 tag）。
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            pack: pack:mac
+          - os: windows-latest
+            pack: pack:win
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      # Windows 上 better-sqlite3 无预编译二进制，node-gyp 从源码编译（runner 预装 VS Build Tools）。
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm -C apps/renderer run build
+
+      - run: pnpm run typecheck
+
+      - run: pnpm run test
+
+      - name: Package
+        run: pnpm -C apps/desktop run ${{ matrix.pack }}
+        env:
+          # 第一版未签名：关闭证书自动发现，mac 走 ad-hoc。
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: apps/desktop/release/*.*
+          fail_on_unmatched_files: false

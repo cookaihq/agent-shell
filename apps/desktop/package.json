@@ -1,0 +1,27 @@
+{
+  "name": "@agent-shell/desktop",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "dist/main.cjs",
+  "scripts": {
+    "build": "node build.mjs",
+    "start": "electron dist/main.cjs",
+    "pack:mac": "node build.mjs && electron-builder --mac --publish never",
+    "pack:win": "node build.mjs && electron-builder --win --publish never"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.10.0"
+  },
+  "devDependencies": {
+    "@agent-shell/contracts": "workspace:*",
+    "@agent-shell/daemon": "workspace:*",
+    "@agent-shell/sidecar": "workspace:*",
+    "electron": "41.7.1",
+    "electron-builder": "^25.1.8",
+    "@electron/rebuild": "^3.6.0",
+    "esbuild": "^0.24.0",
+    "@types/node": "^22.0.0",
+    "electron-updater": "^6.3.9"
+  }
+}

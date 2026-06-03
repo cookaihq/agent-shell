@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"th_fixture"}
+{"type":"turn.started"}
+{"type":"error","message":"Reconnecting... 1/5 (unexpected status 503 Service Unavailable: No available channel for model gpt-5-codex)"}
+{"type":"error","message":"unexpected status 503 Service Unavailable: No available channel for model gpt-5-codex"}
+{"type":"turn.failed","error":{"message":"unexpected status 503 Service Unavailable: No available channel for model gpt-5-codex"}}
