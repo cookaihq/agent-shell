@@ -7,7 +7,7 @@ import { startDaemon, type DaemonServer } from '../server'
 import { openDatabase } from '../db/database'
 import { SessionRuntime } from '../session/sessionRuntime'
 import { getSession } from '../db/sessions'
-import { getMessages } from '../db/messages'
+import { readRecords } from '../session/transcript'
 
 let server: DaemonServer | null = null
 let tmp = ''
@@ -38,7 +38,8 @@ describe('M6 端到端会话生命周期', () => {
   it('建项目→建会话→submit→SSE→落库→续投→interrupt（codex 全链路，mock 引擎）', async () => {
     const db = openDatabase(':memory:')
     const children: any[] = []
-    const runtime = new SessionRuntime({ db, resolveBin: () => '/bin', spawnFn: (() => { const c = fakeChild(); children.push(c); return c }) as any })
+    const tdir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-tr-'))
+    const runtime = new SessionRuntime({ db, resolveBin: () => '/bin', spawnFn: (() => { const c = fakeChild(); children.push(c); return c }) as any, transcriptDir: tdir })
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'as-e2e-'))
     server = await startDaemon({ detect: () => ({ claude: '/x', codex: '/x' }), db, runtime, projectsDir: tmp })
     const U = server.url
@@ -84,12 +85,9 @@ describe('M6 端到端会话生命周期', () => {
     await tick()
     expect(getSession(db, sid)).toMatchObject({ status: 'aborted' })
 
-    // 7. 历史消息验证：
-    //   submit() 设计为"user 消息立即落库（含排队时）"，所以 q2(user) 在 q1 的 assistant 回复之前落库。
-    //   真实顺序：user(q1) → user(q2) → assistant(a1)
-    //   （q2 在第一轮 running=true 时 submit，user 消息立即入库后入队；a1 在 close 后的 onTurnEnd 才落库）
-    const roles = getMessages(db, sid).map((m) => m.role)
-    expect(roles).toEqual(['user', 'user', 'assistant'])
+    // 7. 历史落盘验证：q1(user) → q2(user，入队) → a1(codex assistant)，按记录类型核对
+    const types = readRecords(tdir, sid).map((r) => r.type)
+    expect(types).toEqual(['user_prompt', 'user_prompt', 'assistant_blocks'])
 
     ac.abort()
     await reader.cancel().catch(() => {})

@@ -24,6 +24,10 @@ export interface SessionRow {
   pinned: boolean
   status: SessionStatus
   resumableId: string | null
+  permissionMode: string | null   // 会话级权限档（claude permissionMode），Issue 13/29
+  effort: string | null           // 会话级思考强度（当前引擎 effort），Issue 13/29
+  claudeCodeVersion: string | null
+  sdkVersion: string | null
   createdAt: number
 }
 export interface CreateSessionInput {
@@ -31,6 +35,8 @@ export interface CreateSessionInput {
   engine: Engine
   model: string
   title?: string
+  permissionMode?: string
+  effort?: string
 }
 
 export interface MessageRow {

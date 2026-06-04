@@ -45,6 +45,15 @@ const IconResume = () => (
   </svg>
 )
 
+const IconTrash = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+    <path d="M3 6h18" />
+    <path d="M8 6V4h8v2" />
+    <path d="M19 6l-1 14H6L5 6" />
+    <path d="M10 11v6M14 11v6" />
+  </svg>
+)
+
 // ── 单项 ──────────────────────────────────────────────────────────────────────
 
 interface HistItemProps {
@@ -55,10 +64,13 @@ interface HistItemProps {
   onResume: (id: string) => void
   onPin: (id: string, pinned: boolean) => void
   onRename: (id: string, title: string) => void
+  /** 真删除会话（连同对话历史，不可恢复）；与 tab 的「关闭」不同。 */
+  onDelete: (id: string) => void
 }
 
-function HistItem({ session, isActive, activeRunning, onSelect, onResume, onPin, onRename }: HistItemProps) {
+function HistItem({ session, isActive, activeRunning, onSelect, onResume, onPin, onRename, onDelete }: HistItemProps) {
   const [renaming, setRenaming] = useState(false)
+  const [confirming, setConfirming] = useState(false)
   const [draft, setDraft] = useState('')
   const [doneRef] = useState({ current: false })
 
@@ -98,6 +110,25 @@ function HistItem({ session, isActive, activeRunning, onSelect, onResume, onPin,
       onRename(session.id, trimmed)
     }
     setRenaming(false)
+  }
+
+  // 删除二次确认：点垃圾桶 → 整行替换为确认条，确认才真删（删了对话历史不可恢复）
+  if (confirming) {
+    return (
+      <div className="hist-item is-confirming">
+        <span className="hi-confirm-text">删除「{session.title}」？此操作不可恢复</span>
+        <span className="hi-confirm-actions">
+          <button
+            className="hi-confirm-btn del"
+            onClick={(e) => { e.preventDefault(); e.stopPropagation(); onDelete(session.id) }}
+          >删除</button>
+          <button
+            className="hi-confirm-btn"
+            onClick={(e) => { e.preventDefault(); e.stopPropagation(); setConfirming(false) }}
+          >取消</button>
+        </span>
+      </div>
+    )
   }
 
   return (
@@ -159,6 +190,15 @@ function HistItem({ session, isActive, activeRunning, onSelect, onResume, onPin,
         >
           <IconEdit />
         </button>
+        {/* 删除按钮：真删除会话（连同对话历史）→ 进二次确认。区别于 tab 的「关闭」（仅隐藏 tab）。 */}
+        <button
+          className="hi-act"
+          data-act="delete"
+          title="删除会话"
+          onClick={(e) => { e.preventDefault(); e.stopPropagation(); setConfirming(true) }}
+        >
+          <IconTrash />
+        </button>
       </span>
     </div>
   )
@@ -174,6 +214,8 @@ interface SessionHistoryProps {
   onResume: (id: string) => void
   onPin: (id: string, pinned: boolean) => void
   onRename: (id: string, title: string) => void
+  /** 真删除会话（连同对话历史，不可恢复） */
+  onDelete: (id: string) => void
 }
 
 export function SessionHistory({
@@ -184,6 +226,7 @@ export function SessionHistory({
   onResume,
   onPin,
   onRename,
+  onDelete,
 }: SessionHistoryProps) {
   const [query, setQuery] = useState('')
 
@@ -192,8 +235,9 @@ export function SessionHistory({
     ? sessions.filter((s) => s.title.includes(query.trim()))
     : sessions
 
+    // .menu 基类是 display:none，靠 .open 显示（原型 wirePopover 范式）；React 这里条件挂载即「已打开」，必须带 open
   return (
-    <div className="menu hist-menu" id="chatHistPop">
+    <div className="menu hist-menu open" id="chatHistPop">
       {/* 搜索框（L34）*/}
       <div className="hist-search">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round">
@@ -209,7 +253,9 @@ export function SessionHistory({
 
       {/* 会话列表（L35-44）*/}
       <div className="hist-scroll">
-        {filtered.map((s) => (
+        {filtered.length === 0 ? (
+          <div className="hist-empty">{query.trim() ? '没有匹配的会话' : '暂无会话'}</div>
+        ) : filtered.map((s) => (
           <HistItem
             key={s.id}
             session={s}
@@ -219,6 +265,7 @@ export function SessionHistory({
             onResume={onResume}
             onPin={onPin}
             onRename={onRename}
+            onDelete={onDelete}
           />
         ))}
       </div>

@@ -1,24 +1,11 @@
 /**
- * Composer.tsx — Task 17 + 18 (含 Task 15 基础)
+ * Composer.tsx — 工作区输入框（发送/停止 + @// 提及 + 消息附件 + CtxMeter + CtxFile）
  *
- * 高保真对照 workspace.html L64-90（composer 结构）
- * + app.js L850-937（发送/停止状态机）
- * + app.js L661-743（@ / / 提及菜单）  ← Task 17
- * + app.js L631-658（附件预览）        ← Task 18
- * + app.js L587-600（上下文计量环）    ← Task 18
- *
- * 结构：
- *   .composer > .composer-shell
- *     > MentionPop              (Task 17)
- *     > AttachBar               (Task 18)
- *     > textarea
- *     > .composer-row
- *         > .left
- *             > .cbtn.cbtn-icon + input[file hidden] (附件按钮, Task 18)
- *             > .model-wrap > ModelPill
- *             > CtxFile         (Task 18 建组件，activeFile 联动 Task 20)
- *         > CtxMeter            (Task 18)
- *         > .csend              (发送键 / 停止键双态)
+ * 消息附件（本设计）：
+ *   - 回形针按钮 → 原生选择器 pickPaths 拿绝对路径（不复制，发送时作为 contextFiles 引用；项目外由 daemon 授权读取）
+ *   - 粘贴 → 剪贴板字节即时 uploadPaste 写进 <project>/attachments/，引用其相对路径
+ *   - 发送 → onSubmit(text, contextFiles)，daemon 拼 preamble 让 agent Read
+ * 「拖文件进文件面板→项目根」是另一入口（FileWorkspace，simplty 2504084），不在此处。
  */
 
 import { useState, useRef, useCallback, useEffect, type KeyboardEvent } from 'react'
@@ -26,50 +13,75 @@ import { IconSend, IconStop, IconPaperclip } from '../ui/icons'
 import { ModelPill } from './ModelPill'
 import { MentionPop } from './MentionPop'
 import { useMention } from './useMention'
-import { AttachBar } from './AttachBar'
+import { AttachBar, type AttachChip } from './AttachBar'
 import { CtxMeter } from './CtxMeter'
 import { CtxFile } from './CtxFile'
 import { api } from '../api/client'
 import type { UsageDTO } from '../api/types'
+import type { AgentShellBridge } from '@agent-shell/contracts'
 
-export interface AttachedFile {
-  file: File
-  objectUrl: string // 仅图片用，文件图标态为空串
-  isImage: boolean
-}
+/** 一条已就绪的消息附件：path=喂给 daemon 的 contextFiles 路径（按钮→绝对、粘贴→相对）；name/kind 用于 chip 显示。 */
+interface Attachment { name: string; path: string; kind: 'file' | 'dir' }
+
+function basename(p: string): string { return p.split(/[\\/]/).filter(Boolean).pop() ?? p }
+/** 选择器只给路径不给类型，按「basename 有无扩展名」粗判 chip 图标（仅显示用；daemon 侧按 stat 精确授权）。 */
+function guessKind(p: string): 'file' | 'dir' { return /\.[^./\\]+$/.test(basename(p)) ? 'file' : 'dir' }
 
 interface ComposerProps {
   running: boolean
-  onSubmit: (text: string) => void
+  onSubmit: (text: string, contextFiles: string[]) => void
   onInterrupt: () => void
   engine: 'claude' | 'codex'
   model: string
   projectId: string
-  /** usage 由 Workspace 传入（Task 18）：api.usage 初值 + SSE liveUsage 叠加 */
+  sessionId?: string                 // 传给 ModelPill 拉动态模型列表
   usage?: UsageDTO
-  /** 当前打开文件路径（Task 20）：Workspace → Composer → CtxFile 联动 */
+  /** 运行中的实时 token 估算（progress 事件）→ CtxMeter 实时同步（Issue 10）。 */
+  liveTokens?: number
   activeFile?: string | null
 }
 
-export function Composer({ running, onSubmit, onInterrupt, projectId, usage, activeFile }: ComposerProps) {
+export function Composer({ running, onSubmit, onInterrupt, engine, model, projectId, sessionId, usage, liveTokens, activeFile }: ComposerProps) {
   const [text, setText] = useState('')
-  // IME 输入法组合态，组合中 Enter 不发送
   const composingRef = useRef(false)
   const taRef = useRef<HTMLTextAreaElement>(null)
-  const fileInputRef = useRef<HTMLInputElement>(null)
 
-  // ── 附件列表（前端态，不上传；submit 不带附件；上传/组装=后续子里程碑）────────────
-  const [attachments, setAttachments] = useState<AttachedFile[]>([])
+  // ── 消息附件 ────────────────────────────────────────────────────────────────────
+  const [attachments, setAttachments] = useState<Attachment[]>([])
+  const removeAttachment = useCallback((idx: number) => {
+    setAttachments(prev => prev.filter((_, i) => i !== idx))
+  }, [])
 
-  // ── 真实项目文件（Composer mount 时拍平，传给 useMention）────────────────────────
+  // 回形针按钮：原生选择器拿绝对路径（文件/文件夹/多选），引用不复制
+  const pickAttachments = useCallback(async () => {
+    const bridge = (globalThis as { agentShell?: AgentShellBridge }).agentShell
+    if (!bridge) return
+    const paths = await bridge.pickPaths()
+    if (paths.length === 0) return
+    setAttachments(prev => [...prev, ...paths.map(p => ({ name: basename(p), path: p, kind: guessKind(p) }))])
+  }, [])
+
+  // 粘贴：剪贴板字节无源路径 → 即时上传写进 attachments/，引用相对路径
+  const onPaste = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = e.clipboardData?.items
+    if (!items || !projectId) return
+    for (const it of Array.from(items)) {
+      if (it.kind !== 'file') continue
+      const f = it.getAsFile()
+      if (!f) continue
+      const name = f.name || `pasted-${f.type.split('/')[1] || 'bin'}`
+      api.uploadPaste(projectId, f, name)
+        .then(({ file }) => setAttachments(prev => [...prev, { name: file.name, path: file.path, kind: 'file' }]))
+        .catch(() => { /* 上传失败不阻塞，静默 */ })
+    }
+  }, [projectId])
+
+  // ── 真实项目文件（@ 提及用）─────────────────────────────────────────────────────
   const [filePaths, setFilePaths] = useState<string[]>([])
   useEffect(() => {
     if (!projectId) return
     api.files(projectId)
       .then(({ tree }) => {
-        // 递归拍平 FileNode 树 → 路径列表
-        // 目录节点补尾斜杠，使 useMention buildItems 的 endsWith('/') 判断正确
-        // 这样 @decks/ 能筛出该目录下文件，且 @ 菜单文件夹图标显示正确
         const flat: string[] = []
         function walk(nodes: typeof tree) {
           for (const n of nodes) {
@@ -80,79 +92,53 @@ export function Composer({ running, onSubmit, onInterrupt, projectId, usage, act
         walk(tree)
         setFilePaths(flat)
       })
-      .catch(() => { /* 加载失败静默，不影响 Composer 功能 */ })
+      .catch(() => { /* 加载失败静默 */ })
   }, [projectId])
 
-  // ── 提及菜单（Task 17）───────────────────────────────────────────────────────
-  // 技能占位静态集（真实来自 Skills 库=M7c）
-  const skillNames: string[] = []
+  // 技能候选（@ 提及，Issue 5）：接现成的全局技能库接口（不绑 projectId），不再写死空数组
+  const [skillNames, setSkillNames] = useState<string[]>([])
+  useEffect(() => {
+    api.listSkills()
+      .then(({ skills }) => setSkillNames(skills.map((s) => s.name)))
+      .catch(() => { /* 技能库加载失败静默：@ 仍可提及文件 */ })
+  }, [])
   const mention = useMention(filePaths, skillNames)
-
-  // ── 附件帮助函数 ──────────────────────────────────────────────────────────────
-  const addFile = useCallback((file: File) => {
-    const isImage = file.type.startsWith('image/')
-    const objectUrl = isImage ? URL.createObjectURL(file) : ''
-    setAttachments(prev => [...prev, { file, objectUrl, isImage }])
-  }, [])
-
-  const removeAttachment = useCallback((idx: number) => {
-    setAttachments(prev => {
-      const item = prev[idx]
-      if (item?.objectUrl) URL.revokeObjectURL(item.objectUrl)
-      return prev.filter((_, i) => i !== idx)
-    })
-  }, [])
-
-  // ── 粘贴图片/文件检测 ─────────────────────────────────────────────────────────
-  const onPaste = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    const items = e.clipboardData?.items
-    if (!items) return
-    Array.from(items).forEach(it => {
-      if (it.kind === 'file') {
-        const f = it.getAsFile()
-        if (f) addFile(f)
-      }
-    })
-  }, [addFile])
 
   // ── 发送 ──────────────────────────────────────────────────────────────────────
   const send = () => {
     const t = text.trim()
-    if (!t) return
-    onSubmit(t)
+    if (!t && attachments.length === 0) return
+    onSubmit(t, attachments.map(a => a.path))
     setText('')
+    setAttachments([])
   }
 
-  // ── 键盘处理 ──────────────────────────────────────────────────────────────────
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    // mention-pop 打开时：方向键/Enter/Tab/Esc 让给菜单（Task 17）
     if (mention.open) {
       mention.onKeyDown(e)
-      // Enter/Tab 选中 → 执行 choose 并同步 React text state
       if ((e.key === 'Enter' || e.key === 'Tab') && taRef.current) {
         const newVal = mention.choose(taRef.current)
         setText(newVal)
       }
       return
     }
-    // mention 关闭时 Enter 发送
     if (e.key === 'Enter' && !e.shiftKey && !composingRef.current) {
       e.preventDefault()
       send()
     }
   }
 
-  // ── textarea input 同步 text state + 触发 mention detect ─────────────────────
   const onInput = (e: React.FormEvent<HTMLTextAreaElement>) => {
     const ta = e.currentTarget
     setText(ta.value)
     mention.onInput(ta)
   }
 
+  const chips: AttachChip[] = attachments.map(a => ({ name: a.name, kind: a.kind }))
+
   return (
     <div className="composer">
       <div className="composer-shell">
-        {/* mention-pop — Task 17 */}
         <MentionPop
           open={mention.open}
           items={mention.items}
@@ -165,8 +151,7 @@ export function Composer({ running, onSubmit, onInterrupt, projectId, usage, act
           }}
         />
 
-        {/* attach-bar — Task 18 */}
-        <AttachBar attachments={attachments} onRemove={removeAttachment} />
+        <AttachBar attachments={chips} onRemove={removeAttachment} />
 
         <textarea
           ref={taRef}
@@ -182,55 +167,31 @@ export function Composer({ running, onSubmit, onInterrupt, projectId, usage, act
 
         <div className="composer-row">
           <div className="left">
-            {/* 附件按钮 + 隐藏 file input — Task 18 */}
+            {/* 回形针：原生选择器拿绝对路径（引用，不复制） */}
             <button
               className="cbtn cbtn-icon"
               title="添加附件"
               type="button"
-              onClick={() => fileInputRef.current?.click()}
+              onClick={() => void pickAttachments()}
             >
               <IconPaperclip size={15} />
             </button>
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              hidden
-              onChange={(e) => {
-                Array.from(e.target.files ?? []).forEach(addFile)
-                e.target.value = ''
-              }}
-            />
 
-            {/* 模型胶囊 */}
             <div className="model-wrap">
-              <ModelPill />
+              <ModelPill sessionId={sessionId} />
             </div>
 
-            {/* ctx-file — Task 20：activeFile 由 Workspace 经 FileWorkspace 联动传入 */}
             <CtxFile activeFile={activeFile ?? null} />
           </div>
 
-          {/* ctx-wrap / CtxMeter — Task 18 */}
-          <CtxMeter usage={usage} />
+          <CtxMeter usage={usage} model={model} liveTokens={liveTokens} />
 
-          {/* csend：运行中 → 停止键；空闲 → 发送键 (app.js L862-866) */}
           {running ? (
-            <button
-              className="csend is-running"
-              title="中断当前任务"
-              type="button"
-              onClick={onInterrupt}
-            >
+            <button className="csend is-running" title="中断当前任务" type="button" onClick={onInterrupt}>
               <IconStop size={13} />
             </button>
           ) : (
-            <button
-              className="csend"
-              title="发送"
-              type="button"
-              onClick={send}
-            >
+            <button className="csend" title="发送" type="button" onClick={send}>
               <IconSend size={15} />
             </button>
           )}

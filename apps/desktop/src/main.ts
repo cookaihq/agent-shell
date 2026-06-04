@@ -86,8 +86,8 @@ function installAppMenu(): void {
       label: 'View',
       submenu: [
         { role: 'reload' }, { role: 'forceReload' }, { role: 'toggleDevTools' },
-        { type: 'separator' },
-        { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' },
+        // 不放 resetZoom/zoomIn/zoomOut —— 它们的快捷键会缩放整个渲染页面。
+        // Cmd/Ctrl +/-/0 改由 renderer 捕获、只缩放预览区（见 Preview.tsx）。
         { type: 'separator' }, { role: 'togglefullscreen' },
       ],
     },
@@ -121,7 +121,13 @@ function installMacChromeCss(win: BrowserWindow): void {
   })
 }
 
-const DAEMON_NAMESPACE = 'agent-shell'
+// 构建渠道：build 时由 esbuild define 内联（pack:mac:dev / build:dev 设 AGENT_SHELL_CHANNEL=dev）。
+// 缺省 stable。渠道决定 namespace（IPC socket 隔离）+ dataDir（DB 隔离）+ projectsDir（项目文件隔离）+ 是否查更新。
+const CHANNEL = process.env.AGENT_SHELL_CHANNEL || 'stable'
+const IS_DEV_CHANNEL = CHANNEL === 'dev'
+const DAEMON_NAMESPACE = IS_DEV_CHANNEL ? 'agent-shell-dev' : 'agent-shell'
+const DATA_DIR = IS_DEV_CHANNEL ? '.agent-shell-dev' : '.agent-shell'
+const PROJECTS_DIR = IS_DEV_CHANNEL ? 'AgentShell-dev' : 'AgentShell'
 const PENDING_POLL_MS = 150    // daemon 未就绪时的轮询间隔（快，对齐 open-design 的 tick）
 const RUNNING_POLL_MS = 2000   // 已加载后的低频轮询：daemon 重启换端口时自动重载窗口
 
@@ -171,9 +177,26 @@ async function createWindow(): Promise<void> {
     const r = await dialog.showOpenDialog({ properties: ['openDirectory'] })
     return r.canceled || r.filePaths.length === 0 ? null : r.filePaths[0]
   })
+  // 原生文件/文件夹选择器（可多选）：返回所选绝对路径数组（取消为空数组）。消息附件用。
+  ipcMain.handle(DESKTOP_IPC.pickPaths, async () => {
+    const r = await dialog.showOpenDialog({ properties: ['openFile', 'openDirectory', 'multiSelections'] })
+    return r.canceled ? [] : r.filePaths
+  })
   // 顶部页签持久：renderer 经 preload sendSync 读、send 写主进程文件
   ipcMain.on(DESKTOP_IPC.tabsGet, (e) => { e.returnValue = readTabsState() })
   ipcMain.on(DESKTOP_IPC.tabsSet, (_e, json: unknown) => { if (typeof json === 'string') writeTabsState(json) })
+  // 用系统默认程序打开本地文件（预览工具栏「在编辑器中打开」）。路径由 daemon 侧越界校验后给出。
+  ipcMain.handle(DESKTOP_IPC.openPath, async (_e, absPath: unknown) => {
+    if (typeof absPath !== 'string' || !absPath) return { ok: false, error: 'invalid path' }
+    const error = await shell.openPath(absPath)   // 成功返回 ''，失败返回系统错误信息
+    return { ok: !error, error: error || undefined }
+  })
+  // 在系统默认浏览器打开外部链接（CLI 更新 → 官方 GitHub 页）。仅放行 https，挡掉 file:// 等本地协议。
+  ipcMain.handle(DESKTOP_IPC.openExternal, async (_e, url: unknown) => {
+    if (typeof url !== 'string' || !/^https:\/\//i.test(url)) return { ok: false, error: 'invalid url' }
+    try { await shell.openExternal(url); return { ok: true } }
+    catch (e) { return { ok: false, error: e instanceof Error ? e.message : 'open failed' } }
+  })
 
   const win = new BrowserWindow({
     width: 1280,
@@ -188,16 +211,36 @@ async function createWindow(): Promise<void> {
   })
   installMacChromeCss(win)
 
+  // 右键菜单（Issue 18）：选中文字 → 复制；输入框 → 剪切/复制/粘贴/全选（editFlags 驱动）。
+  // 一处统一覆盖整窗口；role 由 Electron 原生执行（作用于聚焦的 webContents），自带本地化文案。
+  win.webContents.on('context-menu', (_e, params) => {
+    const ef = params.editFlags
+    const template: MenuItemConstructorOptions[] = []
+    if (params.isEditable) {
+      template.push(
+        { role: 'cut', enabled: ef.canCut },
+        { role: 'copy', enabled: ef.canCopy },
+        { role: 'paste', enabled: ef.canPaste },
+        { type: 'separator' },
+        { role: 'selectAll' },
+      )
+    } else if (params.selectionText && params.selectionText.trim()) {
+      template.push({ role: 'copy' })
+    }
+    if (template.length === 0) return
+    Menu.buildFromTemplate(template).popup({ window: win })
+  })
+
   // 先上加载页，立刻有反馈；再 spawn daemon（不阻塞），由轮询在其就绪后切到真页面。
   await win.loadURL(pendingHtml())
-  daemon = startDaemonProcess({ webDir, namespace: DAEMON_NAMESPACE, authSecret })
+  daemon = startDaemonProcess({ webDir, namespace: DAEMON_NAMESPACE, authSecret, dataDir: DATA_DIR, projectsDir: PROJECTS_DIR })
   startUrlDiscoveryLoop(win)
 }
 
 app.whenReady().then(async () => {
   installAppMenu()   // 系统菜单栏（替换 Electron 默认菜单）
   await createWindow()
-  initUpdater()   // 仅打包态查更新（dev 内部直接 return）；全程 fail-soft
+  if (!IS_DEV_CHANNEL) initUpdater()   // dev 渠道不查更新（不引导去下正式版）；正式版照旧仅打包态查
 }).catch((err) => {
   console.error('[desktop] 启动失败:', err)
   app.quit()

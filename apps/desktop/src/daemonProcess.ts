@@ -18,7 +18,7 @@ export interface DaemonHandle {
  * 的 Vite 产物目录（同源 serve）。仅负责 spawn——**不在此阻塞等 sidecar 发现 URL**：URL 发现交给主
  * 进程的轮询（先上加载页、daemon 一就绪再切真页，且持续轮询以在 daemon 重启换端口时自愈，对齐 open-design）。
  */
-export function startDaemonProcess(opts: { webDir: string; namespace?: string; authSecret?: string }): DaemonHandle {
+export function startDaemonProcess(opts: { webDir: string; namespace?: string; dataDir?: string; projectsDir?: string; authSecret?: string }): DaemonHandle {
   const namespace = opts.namespace ?? 'default'
 
   const child: ChildProcess = spawn(process.execPath, [DAEMON_ENTRY], {
@@ -27,6 +27,8 @@ export function startDaemonProcess(opts: { webDir: string; namespace?: string; a
       ELECTRON_RUN_AS_NODE: '1',
       AGENT_SHELL_WEB_DIR: opts.webDir,
       AGENT_SHELL_NAMESPACE: namespace,
+      ...(opts.dataDir ? { AGENT_SHELL_DATA_DIR: opts.dataDir } : {}),
+      ...(opts.projectsDir ? { AGENT_SHELL_PROJECTS_DIR: opts.projectsDir } : {}),
       ...(opts.authSecret ? { AGENT_SHELL_AUTH_SECRET: opts.authSecret } : {}),
     },
     stdio: ['ignore', 'inherit', 'inherit'],

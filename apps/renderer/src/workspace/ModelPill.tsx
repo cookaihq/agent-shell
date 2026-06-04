@@ -16,6 +16,7 @@
  */
 
 import { useState, useEffect, useRef } from 'react'
+import { api } from '../api/client'
 import {
   useRuntime,
   chipPerm,
@@ -27,17 +28,30 @@ import {
   EFFORTS,
   CLI_MODELS,
   AGENT_LABEL,
+  modelLabel,
   type ClaudeMode,
   type CodexApproval,
   type CodexSandbox,
 } from './runtimeState'
 import type { Engine } from '../api/types'
 
-export function ModelPill() {
+/** 动态模型项（来自 daemon supportedModels）：value=API id（发给 daemon），displayName=展示名，description=副标题（能力描述，含 1M 等）。 */
+export interface DynModel { value: string; displayName: string; description?: string }
+
+export function ModelPill({ sessionId }: { sessionId?: string } = {}) {
   const { runtime, dispatch } = useRuntime()
   const [open, setOpen] = useState(false)
+  // 动态模型列表（claude）：打开弹窗时拉一次活动会话的 supportedModels；null=无活会话 → 回落静态 CLI_MODELS
+  const [dynModels, setDynModels] = useState<DynModel[] | null>(null)
   const btnRef = useRef<HTMLButtonElement>(null)
   const popRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open || !sessionId || runtime.agent !== 'claude') return
+    let off = false
+    api.models(sessionId).then((r) => { if (!off) setDynModels(r.models) }).catch(() => {})
+    return () => { off = true }
+  }, [open, sessionId, runtime.agent])
 
   // 点外部关弹窗（移植 model-btn IIFE L626）
   useEffect(() => {
@@ -80,7 +94,7 @@ export function ModelPill() {
         }}
       >
         <span className="mb-text">
-          <span className="model-name">{runtime.model}</span>
+          <span className="model-name">{modelLabel(runtime.agent, runtime.model, dynModels)}</span>
           <span className="mb-extra">
             {perm && (
               <>
@@ -105,6 +119,7 @@ export function ModelPill() {
           <ModelPopContent
             runtime={runtime}
             dispatch={dispatch}
+            dynModels={dynModels}
             onClose={() => setOpen(false)}
           />
         </div>
@@ -118,16 +133,22 @@ export function ModelPill() {
 interface ModelPopContentProps {
   runtime: ReturnType<typeof useRuntime>['runtime']
   dispatch: ReturnType<typeof useRuntime>['dispatch']
+  dynModels?: DynModel[] | null
   onClose: () => void
 }
 
-function ModelPopContent({ runtime, dispatch, onClose }: ModelPopContentProps) {
+function ModelPopContent({ runtime, dispatch, dynModels, onClose }: ModelPopContentProps) {
   const agent = runtime.agent
   const efforts = EFFORTS[agent] ?? []
   const curEffortId = runtime.effort[agent]
   const curEffort = efforts.find((l) => l.id === curEffortId) ?? efforts[0]
-  const modelList = CLI_MODELS[agent] ?? []
-  const groupLabel = AGENT_LABEL[agent] ?? agent
+  // claude 有活动会话的动态模型 → 用 {value,displayName}；否则回落静态展示名列表
+  const dynamic = agent === 'claude' && dynModels && dynModels.length > 0 ? dynModels : null
+  // claude 活动会话用 SDK supportedModels（value/displayName/description，含 1M 变体）；否则回落静态表
+  const modelList: { value: string; label: string; description?: string }[] = dynamic
+    ? dynamic.map((m) => ({ value: m.value, label: m.displayName, description: m.description }))
+    : (CLI_MODELS[agent] ?? [])
+  const groupLabel = (AGENT_LABEL[agent] ?? agent) + (dynamic ? ' · 动态' : '')
 
   const handleClick = (e: React.MouseEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement
@@ -165,7 +186,7 @@ function ModelPopContent({ runtime, dispatch, onClose }: ModelPopContentProps) {
 
   return (
     <div onClick={handleClick}>
-      {/* 权限段 / 审批策略+沙箱段 */}
+      {/* claude 权限段（5 档原生 permissionMode，接 SDK 真链路）；codex 审批策略+沙箱段 */}
       {agent === 'claude' && (
         <div className="model-group">
           <div className="model-group-h">权限</div>
@@ -234,17 +255,21 @@ function ModelPopContent({ runtime, dispatch, onClose }: ModelPopContentProps) {
         </div>
       )}
 
-      {/* 模型段 (app.js L203-206) */}
+      {/* 模型段 — 对齐 Claude Code 原生 Select a model：displayName 标题 + description 副标题 + 选中打勾高亮 */}
       <div className="model-group">
         <div className="model-group-h">{groupLabel}</div>
         {modelList.map((m) => (
           <button
-            key={m}
+            key={m.value}
             type="button"
-            className={`model-item${m === runtime.model ? ' is-active' : ''}`}
-            data-model={m}
+            className={`model-item${m.description ? ' model-item-2l' : ''}${m.value === runtime.model ? ' is-active' : ''}`}
+            data-model={m.value}
           >
-            {m}<span className="mk">✓</span>
+            <span className="mi-text">
+              <span className="mi-title">{m.label}</span>
+              {m.description && <span className="mi-desc">{m.description}</span>}
+            </span>
+            <span className="mk">✓</span>
           </button>
         ))}
       </div>

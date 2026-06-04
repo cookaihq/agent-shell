@@ -14,6 +14,8 @@ export interface RunTurnOpts {
   prompt: string
   permissionMode?: string       // claude
   sandbox?: string              // codex
+  /** 需授权读取的项目外目录集（消息附件引用项目外路径时）。 */
+  addDirs?: string[]
   /** 引擎侧 resume 指针（codex thread_id / claude session_id）；有则起进程时拼 resume 旗标。 */
   resumableId?: string
   creds?: ProviderCreds         // BYOK（V1 不传）
@@ -27,9 +29,20 @@ export interface RunTurnOpts {
   spawnFn?: typeof nodeSpawn
 }
 
-export interface RunTurnHandle {
-  child: ChildProcess
+/** 引擎无关的 turn 句柄子集：SessionRuntime 只依赖这四项驱动续投/中断/收尾。
+ *  CliSpawnRuntime（RunTurnHandle）与 ClaudeSdkRuntime（ClaudeSdkHandle）都满足它，使 SessionRuntime 按引擎多态。 */
+export interface RuntimeTurnHandle {
   done: Promise<{ exitCode: number | null }>
+  /** 中断本 turn。 */
+  interrupt: (graceMs?: number) => void
+  /** 续投下一条 user 消息（同会话多轮）。 */
+  pushUser: (text: string) => void
+  /** 结束输入，让引擎跑完退出。 */
+  endInput: () => void
+}
+
+export interface RunTurnHandle extends RuntimeTurnHandle {
+  child: ChildProcess
   /** 中断本 turn：SIGTERM→宽限(默认 5s)未退→SIGKILL。合成终结用 stopReason 'aborted'。 */
   interrupt: (graceMs?: number) => void
   /** 往活进程 stdin 续写下一条 user 消息（claude 同进程多轮续投）；同时重置 sawTurnEnd 开启新 turn。 */
@@ -51,7 +64,7 @@ function failDetail(stderr: string, exitCode: number | null, spawnErr?: Error): 
 /** 起一轮：spawn 引擎子进程、按 def 喂 prompt、每进程行缓冲地把分块 stdout 归一为内部事件。 */
 export function runTurn(opts: RunTurnOpts): RunTurnHandle {
   const def = getRuntimeDef(opts.engine)
-  const buildOpts: BuildArgsOpts = { model: opts.model, permissionMode: opts.permissionMode, sandbox: opts.sandbox, resumableId: opts.resumableId }
+  const buildOpts: BuildArgsOpts = { model: opts.model, permissionMode: opts.permissionMode, sandbox: opts.sandbox, resumableId: opts.resumableId, addDirs: opts.addDirs }
   const env = sanitizeEnv(def.authStrategy, opts.baseEnv ?? process.env, opts.creds)
   const spawnFn = opts.spawnFn ?? nodeSpawn
 
@@ -72,6 +85,9 @@ export function runTurn(opts: RunTurnOpts): RunTurnHandle {
 
   // 每进程一个行缓冲：分块 stdout → 完整行 → M2 逐行解析 → 内部事件
   const lb = new LineBuffer()
+  // 逐行解析器：引擎若提供 createParser（如 claude 流式 progress 需跨行累计），每 turn 起一个 per-run 实例（状态隔离，
+  // result 行内部自重置 → 同进程多轮续投也正确）；否则用无状态 parseLine（如 codex）。调度器不硬编码引擎名，仍按 def 多态。
+  const parseLine = def.createParser ? def.createParser() : (line: string) => def.parseLine(line)
   let sawTurnEnd = false   // 追踪本 turn 是否已产出终结事件
   let aborted = false      // interrupt() 置位（Task 3 用）；合成终结时区分 aborted/failed
   let resumableSeen = false  // 嗅探 resume 指针：首次拿到后不再重复回调
@@ -82,7 +98,7 @@ export function runTurn(opts: RunTurnOpts): RunTurnHandle {
         const id = def.extractResumableId(line)
         if (id) { resumableSeen = true; opts.onResumableId(id) }
       }
-      for (const ev of def.parseLine(line)) {
+      for (const ev of parseLine(line)) {
         if (ev.type === 'turn_end') {
           sawTurnEnd = true
           opts.onTurnEnd?.(ev.stopReason)                // 本 Task 新增：每轮终结回调

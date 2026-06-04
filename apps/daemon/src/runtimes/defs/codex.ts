@@ -13,6 +13,8 @@ export const codexDef: RuntimeAgentDef = {
     // 末尾 '-' = 从 stdin 读 prompt；cwd 由 spawn cwd 绑定，--skip-git-repo-check 兜底非 git 目录
     // resume：exec 选项在前，resume <id> 子命令在后，prompt 走 stdin 的 '-'（实测 codex 0.132.0）
     const base = ['exec', '--json', '--skip-git-repo-check', '-m', opts.model, '-s', opts.sandbox ?? 'workspace-write']
+    // 引用项目外路径 → 放行读取。V1 兜底用 disk-full-read-access（偏宽但确定可用；精确可读根待实测收窄）。
+    if ((opts.addDirs ?? []).length > 0) base.push('-c', 'sandbox_permissions=["disk-full-read-access"]')
     return opts.resumableId ? [...base, 'resume', opts.resumableId, '-'] : [...base, '-']
   },
   formatPrompt(text: string): string {

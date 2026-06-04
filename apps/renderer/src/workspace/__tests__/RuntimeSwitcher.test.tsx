@@ -6,7 +6,7 @@ import { RuntimeSwitcher } from '../RuntimeSwitcher'
 import type { RuntimeContextValue, RuntimeAction, RuntimeState } from '../runtimeState'
 import { SettingsProvider } from '../../settings/SettingsContext'
 
-function makeCtx(engine: 'claude' | 'codex' = 'claude', model = 'Claude Opus 4.8') {
+function makeCtx(engine: 'claude' | 'codex' = 'claude', model = 'opus') {
   const runtime = initialRuntime(engine, model)
   return runtime
 }
@@ -35,8 +35,8 @@ describe('RuntimeSwitcher 渲染', () => {
     expect(screen.getByText('本地 CLI')).toBeTruthy()
     // "Claude Code" 在 chip（isw-primary）和弹窗 agent 按钮 ag-nm 里都有，用 getAllByText
     expect(screen.getAllByText('Claude Code').length).toBeGreaterThan(0)
-    // 模型名在 chip isw-model + select option 里都有
-    expect(screen.getAllByText('Claude Opus 4.8').length).toBeGreaterThan(0)
+    // 模型名（value 'opus' → displayName 'Opus'）在 chip isw-model + select option 里都有
+    expect(screen.getAllByText('Opus').length).toBeGreaterThan(0)
   })
 
   it('codex 引擎显示 Codex CLI', () => {
@@ -113,8 +113,8 @@ describe('RuntimeSwitcher dispatch 交互', () => {
     const chip = document.querySelector('.isw-chip')!
     fireEvent.click(chip)
     const select = document.querySelector('.isw-select') as HTMLSelectElement
-    fireEvent.change(select, { target: { value: 'Claude Sonnet 4.6' } })
-    expect(dispatch).toHaveBeenCalledWith({ type: 'SET_MODEL', model: 'Claude Sonnet 4.6' })
+    fireEvent.change(select, { target: { value: 'sonnet' } })
+    expect(dispatch).toHaveBeenCalledWith({ type: 'SET_MODEL', model: 'sonnet' })
   })
 })
 

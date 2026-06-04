@@ -30,6 +30,10 @@ release-mirror/
 # 此规则随 publish-mirror.mjs 拷进镜像仓的 .gitignore，确保镜像仓也忽略它。
 .github-token
 
-# 工具生成的 worktree 目录（Claire/Clone），非源码
+# 工具生成的 worktree 目录（Claire/Clone/Claude Code），非源码
 .claire/
 .clone/
+.claude/worktrees/
+
+# Superpowers 可视化伴侣 mockup（brainstorm 临时产物，非源码）
+.superpowers/

@@ -41,7 +41,7 @@ test('Enter 发送并清空', async () => {
   )
   const ta = screen.getByRole('textbox')
   await userEvent.type(ta, '你好{Enter}')
-  expect(onSubmit).toHaveBeenCalledWith('你好')
+  expect(onSubmit).toHaveBeenCalledWith('你好', [])
   expect((ta as HTMLTextAreaElement).value).toBe('')
 })
 

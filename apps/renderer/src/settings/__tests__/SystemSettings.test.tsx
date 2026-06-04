@@ -2,6 +2,7 @@ import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { vi, afterEach } from 'vitest'
 import { SystemSettings } from '../SystemSettings'
+import { SettingsProvider } from '../SettingsContext'
 
 vi.mock('../../api/client', () => ({ ApiError: class extends Error {}, api: {
   getConfig: vi.fn().mockResolvedValue({ projectsDir: '~/AgentShell/projects', skillsDir: '~/.agent-shell/skills' }),
@@ -9,7 +10,7 @@ vi.mock('../../api/client', () => ({ ApiError: class extends Error {}, api: {
 } }))
 
 test('载入 config 到输入框 + 改父级目录保存', async () => {
-  render(<SystemSettings />)
+  render(<SettingsProvider><SystemSettings /></SettingsProvider>)
   const input = await screen.findByDisplayValue('~/AgentShell/projects')
   await userEvent.clear(input); await userEvent.type(input, '/new/p')
   await userEvent.click(screen.getByText('保存'))
@@ -24,7 +25,7 @@ test('有桌面桥时，点「更改…」调 pickFolder 并填入项目目录',
   const pickFolder = vi.fn().mockResolvedValue('/picked/projects')
   window.agentShell = { authToken: '', pickFolder } as any
 
-  render(<SystemSettings />)
+  render(<SettingsProvider><SystemSettings /></SettingsProvider>)
   // 等待组件挂载并触发 getConfig（两个输入都为空串，等任意一个出现即可）
   await screen.findAllByDisplayValue('')
 

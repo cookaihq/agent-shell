@@ -20,6 +20,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { SessionDTO } from '../api/types'
 import { SessionHistory } from './SessionHistory'
+import { useSettings } from '../settings/SettingsContext'
 
 // ── SVG 图标（inline，1:1 from workspace.html L30, L47）─────────────────────────
 
@@ -42,14 +43,16 @@ const IconPlus = () => (
 interface ChatHeaderProps {
   /** 本项目所有会话列表 */
   sessions: SessionDTO[]
+  /** 已打开的会话 tab（仅这些排成 tab 条，Issue 23） */
+  openSessionIds: string[]
   /** 当前活动会话 ID */
   activeId: string
   /** 当前活动会话是否运行中 */
   activeRunning: boolean
-  /** 当前会话消息数（含 user/assistant） */
-  messageCount: number
   /** 选择历史会话 */
   onSelect: (id: string) => void
+  /** 关闭会话 tab（仅关 tab 不删会话） */
+  onCloseTab: (id: string) => void
   /** 新建会话 */
   onNew: () => void
   /** 继续 failed/aborted 会话 */
@@ -58,25 +61,36 @@ interface ChatHeaderProps {
   onPin: (id: string, pinned: boolean) => void
   /** 重命名（PATCH title） */
   onRename: (id: string, title: string) => void
+  /** 真删除会话（连同对话历史，不可恢复）；区别于 onCloseTab（仅关 tab 显示） */
+  onDelete: (id: string) => void
+  /** 调试模式：当前项目 id（来自 Workspace props） */
+  projectId?: string
 }
 
 export function ChatHeader({
   sessions,
+  openSessionIds,
   activeId,
   activeRunning,
-  messageCount,
   onSelect,
+  onCloseTab,
   onNew,
   onResume,
   onPin,
   onRename,
+  onDelete,
+  projectId,
 }: ChatHeaderProps) {
+  const { debugMode } = useSettings()
   const [histOpen, setHistOpen] = useState(false)
   const wrapRef = useRef<HTMLSpanElement>(null)
 
-  // 当前活动会话标题 + 消息数
+  // 会话 tab 条（Issue 23）：仅 openSessionIds 中、且仍存在于 sessions 的会话；保证当前会话一定在
+  const ids = openSessionIds.includes(activeId) ? openSessionIds : [...openSessionIds, activeId]
+  const tabSessions = ids.map((id) => sessions.find((s) => s.id === id)).filter((s): s is SessionDTO => !!s)
+  const canClose = tabSessions.length > 1
+  // 调试模式：活动会话的 resumableId
   const activeSession = sessions.find((s) => s.id === activeId)
-  const activeTitle = activeSession?.title ?? '会话'
   // 已完成会话数（用于 hist-count 徽章，对照原型 app.js refreshBadge L352-364）
   const doneCount = sessions.filter(
     (s) => s.status === 'completed' && s.id !== activeId
@@ -98,11 +112,39 @@ export function ChatHeader({
 
   return (
     <div className="chat-header">
-      {/* 标题 + 消息数 */}
-      <div className="chat-conv">
-        <span className="ct">{activeTitle}</span>
-        <span className="cmeta">· {messageCount} 条消息</span>
+      {/* 会话 tab 条（Issue 23）：每个已打开会话一个 tab，点切换、× 仅关 tab，溢出横向滚动 */}
+      <div className="sess-tabs">
+        {tabSessions.map((s) => {
+          const active = s.id === activeId
+          const running = active && activeRunning
+          return (
+            <button
+              key={s.id}
+              className={`sess-tab${active ? ' is-active' : ''}`}
+              title={s.title}
+              onClick={() => { if (!active) onSelect(s.id) }}
+            >
+              <span className={`st-dot ${s.engine}`} style={{ background: `var(--${s.engine})` }} />
+              <span className="st-title">{s.title}</span>
+              {running && <span className="st-run" title="运行中" />}
+              {canClose && (
+                <span
+                  className="st-x"
+                  title="关闭标签（不删除会话）"
+                  onClick={(e) => { e.stopPropagation(); onCloseTab(s.id) }}
+                >×</span>
+              )}
+            </button>
+          )
+        })}
       </div>
+
+      {/* 调试模式：proj / sess / sdk / version 标识行 */}
+      {debugMode && (
+        <span className="dbg-head">
+          🐞 proj {projectId?.slice(0, 8) ?? '—'} · sess {activeId?.slice(0, 8) ?? '—'} · sdk {activeSession?.resumableId?.slice(0, 8) ?? '—'}{activeSession?.claudeCodeVersion ? ` · v${activeSession.claudeCodeVersion}${activeSession.sdkVersion ? ` (sdk ${activeSession.sdkVersion})` : ''}` : ''}
+        </span>
+      )}
 
       {/* inline-switcher：历史按钮 + 弹窗 */}
       <div className="inline-switcher">
@@ -134,6 +176,7 @@ export function ChatHeader({
               onResume={onResume}
               onPin={onPin}
               onRename={onRename}
+              onDelete={onDelete}
             />
           )}
         </span>

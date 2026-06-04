@@ -27,13 +27,19 @@
  *   - onActiveFile 联动：activeFileKey 变化时通知 Workspace（CtxFile）
  */
 
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { AgentShellBridge } from '@agent-shell/contracts'
 import { api } from '../api/client'
+import { useSplitDrag } from '../hooks/useSplitDrag'
+import { useFsWatch } from '../hooks/useFsWatch'
 import { FileTree } from './FileTree'
 import { FileList } from './FileList'
 import { Preview } from './Preview'
+import { CommandPreview } from './CommandPreview'
+import type { OpenCommand } from './ChatLog'
 import type { FileNode } from '../api/types'
+
+const CMD_PREFIX = 'cmd:'
 
 // 从拖放事件取一组源磁盘绝对路径。Electron 32+ 已移除 File.path，统一经 preload 的 webUtils.getPathForFile。
 // 浏览器/dev（无 agentShell 桥）下返回空数组 → 不导入（拖放是桌面壳能力）。
@@ -59,30 +65,74 @@ interface FileWorkspaceProps {
   projectId: string
   /** 当前打开文件路径（null=无/浏览器模式），通知 Workspace → Composer → CtxFile */
   onActiveFile: (path: string | null) => void
+  /** 点击运行命令卡的请求（seq 变化即触发开/更新命令 tab）。 */
+  openCmd?: { cmd: OpenCommand; seq: number } | null
 }
 
-export function FileWorkspace({ projectId, onActiveFile }: FileWorkspaceProps) {
+export function FileWorkspace({ projectId, onActiveFile, openCmd }: FileWorkspaceProps) {
   const [tree, setTree] = useState<FileNode[]>([])
-  // 当前激活的 key：'files' 表示浏览器模式，否则为文件路径
+  // 当前激活的 key：'files' 浏览器 / 文件路径 / 'cmd:<id>' 命令 tab
   const [activeFileKey, setActiveFileKey] = useState<string>('files')
   // 已打开的文件 tab 列表（去重有序）
   const [openTabs, setOpenTabs] = useState<string[]>([])
+  // 已打开的命令 tab（按点击顺序，去重 by id；同 id 再点更新其数据）
+  const [cmdTabs, setCmdTabs] = useState<OpenCommand[]>([])
+
+  // 点击运行命令卡 → 开/更新命令 tab 并激活
+  useEffect(() => {
+    if (!openCmd) return
+    const { cmd } = openCmd
+    setCmdTabs((prev) => {
+      const idx = prev.findIndex((c) => c.id === cmd.id)
+      if (idx === -1) return [...prev, cmd]
+      const next = [...prev]; next[idx] = cmd; return next   // 更新输出（可能从运行中→完成）
+    })
+    setActiveFileKey(CMD_PREFIX + cmd.id)
+  }, [openCmd?.seq])
   // 视图 tab（仅「预览」）
   const [activeView] = useState<string>('preview')
   // 拖放进行中：整个文件面板高亮提示
   const [dragActive, setDragActive] = useState(false)
+  // 文件浏览器内部分隔条：左目录树 ↔ 右文件列表（树最小 150、列表最小 240）
+  const { containerRef: fbRef, handleProps: fbHandle, cols: fbCols } = useSplitDrag({ minLeft: 150, minRight: 240 })
 
-  // 加载目录树
-  useEffect(() => {
+  // 当前选中的文件夹相对路径（''=项目根）：新建文件/夹的落点（Issue 15）+ 右侧列表联动（Issue 16）
+  const [selectedDir, setSelectedDir] = useState('')
+
+  // 重新拉取目录树（手动刷新按钮 + 切项目时复用，Issue 20）
+  const refreshTree = useCallback(() => {
     if (!projectId) return
     api.files(projectId)
       .then(({ tree: t }) => setTree(t))
       .catch(() => { /* 静默失败 */ })
   }, [projectId])
 
-  // 通知 Workspace activeFile 变化
+  // 加载目录树（切项目时）
+  useEffect(() => { refreshTree() }, [refreshTree])
+
+  // 项目目录变更 → 防抖重拉（Issue 19 根治：覆盖 agent / 命令行 / 外部程序一切来源；手动刷新按钮兜底）
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const debouncedRefresh = useCallback(() => {
+    if (debounceRef.current) clearTimeout(debounceRef.current)
+    debounceRef.current = setTimeout(() => { debounceRef.current = null; refreshTree() }, 300)
+  }, [refreshTree])
+  useFsWatch(projectId || null, debouncedRefresh)
+
+  // 新建文件/目录（Issue 15）：落点 = 当前选中目录（无则项目根）；建成后刷新树，文件则打开
+  const handleCreate = useCallback(async (name: string, kind: 'file' | 'dir') => {
+    const clean = name.trim()
+    if (!clean) return
+    const rel = selectedDir ? `${selectedDir}/${clean}` : clean
+    try {
+      const { tree: t } = await api.createEntry(projectId, rel, kind)
+      setTree(t)
+      if (kind === 'file') { setOpenTabs((prev) => (prev.includes(rel) ? prev : [...prev, rel])); setActiveFileKey(rel) }
+    } catch { /* 同名/越界等：静默（后续可加 toast） */ }
+  }, [projectId, selectedDir])
+
+  // 通知 Workspace activeFile 变化（命令 tab 不是真实文件 → null）
   useEffect(() => {
-    onActiveFile(activeFileKey === 'files' ? null : activeFileKey)
+    onActiveFile(activeFileKey === 'files' || activeFileKey.startsWith(CMD_PREFIX) ? null : activeFileKey)
   }, [activeFileKey, onActiveFile])
 
   // 打开文件（点树节点或文件列表行）
@@ -93,13 +143,12 @@ export function FileWorkspace({ projectId, onActiveFile }: FileWorkspaceProps) {
     setActiveFileKey(path)
   }
 
-  // 关闭 tab（× 按钮）
-  const closeTab = (path: string, e: React.MouseEvent) => {
+  // 关闭 tab（× 按钮）——文件 tab 与命令 tab 通用
+  const closeTab = (key: string, e: React.MouseEvent) => {
     e.stopPropagation()
-    setOpenTabs(prev => prev.filter(p => p !== path))
-    if (activeFileKey === path) {
-      setActiveFileKey('files')
-    }
+    if (key.startsWith(CMD_PREFIX)) setCmdTabs(prev => prev.filter(c => CMD_PREFIX + c.id !== key))
+    else setOpenTabs(prev => prev.filter(p => p !== key))
+    if (activeFileKey === key) setActiveFileKey('files')
   }
 
   // 拖入文件/文件夹 → 复制进项目根 → 刷新树
@@ -126,6 +175,8 @@ export function FileWorkspace({ projectId, onActiveFile }: FileWorkspaceProps) {
   }
 
   const isFiles = activeFileKey === 'files'
+  const isCmd = activeFileKey.startsWith(CMD_PREFIX)
+  const activeCmd = isCmd ? cmdTabs.find(c => CMD_PREFIX + c.id === activeFileKey) ?? null : null
 
   return (
     <div className="fw" data-testid="file-workspace">
@@ -142,7 +193,7 @@ export function FileWorkspace({ projectId, onActiveFile }: FileWorkspaceProps) {
           文件
         </button>
 
-        {/* 可关闭的文件 tab 列表 */}
+        {/* 可关闭的文件 tab + 命令 tab 列表 */}
         <div className="fw-ftablist">
           {openTabs.map(path => {
             const name = path.split('/').pop() ?? path
@@ -163,10 +214,26 @@ export function FileWorkspace({ projectId, onActiveFile }: FileWorkspaceProps) {
               </button>
             )
           })}
+          {cmdTabs.map(c => {
+            const key = CMD_PREFIX + c.id
+            // tab 标签：读取/编辑用文件名；命令缺省取首词
+            const label = c.tabLabel ?? ('$ ' + (c.command.trim().split(/\s+/).slice(0, 2).join(' ').slice(0, 18) || '命令'))
+            return (
+              <button
+                key={key}
+                className={`fw-ftab fw-ftab-cmd${activeFileKey === key ? ' is-active' : ''}`}
+                type="button"
+                onClick={() => setActiveFileKey(key)}
+              >
+                <span className="ftab-label">{label}</span>
+                <span className="ftab-x" title="关闭" onClick={(e) => closeTab(key, e)}>×</span>
+              </button>
+            )
+          })}
         </div>
 
-        {/* 视图 tab（浏览文件时隐藏） */}
-        <div className="fw-views" style={{ display: isFiles ? 'none' : '' }}>
+        {/* 视图 tab（浏览文件 / 命令 tab 时隐藏） */}
+        <div className="fw-views" style={{ display: isFiles || isCmd ? 'none' : '' }}>
           <button
             className={`fw-tab${activeView === 'preview' ? ' is-active' : ''}`}
             data-fw="preview"
@@ -187,21 +254,26 @@ export function FileWorkspace({ projectId, onActiveFile }: FileWorkspaceProps) {
           onDragLeave={onDragLeave}
           onDrop={onDrop}
         >
-          <div className="file-browser">
-            <FileTree nodes={tree} onOpen={openFile} />
-            <FileList nodes={tree} activeFileKey={activeFileKey} onOpen={openFile} dragActive={dragActive} />
+          <div
+            className="file-browser"
+            ref={fbRef}
+            style={fbCols ? { gridTemplateColumns: fbCols } : undefined}
+          >
+            <FileTree nodes={tree} onOpen={openFile} onRefresh={refreshTree} onSelectDir={setSelectedDir} onCreate={handleCreate} />
+            {/* 内部分隔条：拖动调整目录树 / 文件列表宽度 */}
+            <div className="fb-handle" {...fbHandle} />
+            <FileList nodes={tree} selectedDir={selectedDir} onOpen={openFile} dragActive={dragActive} />
           </div>
         </div>
 
-        {/* 预览 panel */}
+        {/* 预览 panel：文件预览 / 命令预览 */}
         <div
-          className={`fw-panel${!isFiles && activeView === 'preview' ? ' is-active' : ''}`}
+          className={`fw-panel${!isFiles ? ' is-active' : ''}`}
           data-fw="preview"
         >
-          <Preview
-            projectId={projectId}
-            activeFile={isFiles ? null : activeFileKey}
-          />
+          {activeCmd
+            ? <CommandPreview cmd={activeCmd} />
+            : <Preview projectId={projectId} activeFile={isFiles || isCmd ? null : activeFileKey} />}
         </div>
       </div>
     </div>

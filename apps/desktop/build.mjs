@@ -9,13 +9,19 @@ import { execSync } from 'node:child_process'
 // express 改为内联进 bundle（M8d）——使全包只剩 better-sqlite3 一个原生外部依赖，大幅简化打包。
 const common = { bundle: true, format: 'esm', platform: 'node', target: 'node20', logLevel: 'info' }
 
+// 构建渠道：pack:mac:dev / build:dev 会设 AGENT_SHELL_CHANNEL=dev；缺省 stable。
+// 仅内联进 main（主进程据此派生 namespace/dataDir + 关 dev 更新器）。daemon 侧只认运行时 env，无需内联。
+const CHANNEL = process.env.AGENT_SHELL_CHANNEL || 'stable'
+
 await build({
   ...common,
   entryPoints: ['../daemon/src/entry.ts'],
   // 统一布局（M8d）：daemon bundle 出到 desktop 自己的 dist/daemon，与 main.cjs 同在 dist 下，
   // 打包后落 Resources/app/dist/daemon，沿 node_modules 上溯解析 better-sqlite3；dev/packaged 一致。
   outfile: 'dist/daemon/entry.bundle.mjs',
-  external: ['better-sqlite3'],
+  // external：原生模块 better-sqlite3 无法打包；@anthropic-ai/claude-agent-sdk 自带 218MB 平台二进制
+  // （sdk.mjs 用 createRequire 锚定自身定位），打包后由 electron-builder 随 node_modules 纳入、运行时上溯解析。
+  external: ['better-sqlite3', '@anthropic-ai/claude-agent-sdk'],
   // express 等 CJS 依赖被打进 ESM bundle 后，其内部 require 被 esbuild 改写成会抛错的
   // __require stub（"Dynamic require of X is not supported"）。注入真实 require：esbuild 的
   // __require 检测到 `typeof require !== "undefined"` 即委托给它，CJS 依赖的动态 require 恢复可用。
@@ -30,6 +36,7 @@ await build({
   entryPoints: ['src/main.ts'],
   outfile: 'dist/main.cjs',
   external: ['electron'],
+  define: { 'process.env.AGENT_SHELL_CHANNEL': JSON.stringify(CHANNEL) },
 })
 
 // preload 出 CJS：与主进程同理，require('electron') 在 CJS 下可靠；沙箱 preload 保持 dependency-free。

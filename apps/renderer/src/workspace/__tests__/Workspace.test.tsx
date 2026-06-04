@@ -19,6 +19,10 @@ function emitSse(event: string, data: unknown) {
   streamCtrl!.enqueue(enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`))
 }
 
+// fs-watch 走另一条 fetch 流（/projects/:id/fs-stream）；本测试只验 SSE 消息流，stub fetch 是单条共享流，
+// 两个读取者会抢同一 body reader（锁冲突）。生产里两者打不同真实端点、各自独立流，无此问题 → 这里 no-op 隔离。
+vi.mock('../../hooks/useFsWatch', () => ({ useFsWatch: () => {} }))
+
 // ── Mock api client ────────────────────────────────────────────────────────────
 vi.mock('../../api/client', () => ({
   ApiError: class extends Error {},
@@ -38,39 +42,48 @@ vi.mock('../../api/client', () => ({
     usage: vi.fn().mockResolvedValue({ inputTokens: 0, outputTokens: 0, costUsd: 0 }),
     // Task 17: Composer 内用 api.files 加载项目文件列表
     files: vi.fn().mockResolvedValue({ tree: [] }),
+    // Issue 5: Composer 内用 api.listSkills 加载技能候选
+    listSkills: vi.fn().mockResolvedValue({ skills: [] }),
     submit: vi.fn().mockResolvedValue(undefined),
     interrupt: vi.fn().mockResolvedValue(undefined),
     resume: vi.fn().mockResolvedValue(undefined),
     renameProject: vi.fn().mockResolvedValue(undefined),
     patchSession: vi.fn().mockResolvedValue(undefined),
+    getConfig: vi.fn().mockResolvedValue({ projectsDir: '/p', skillsDir: '/s' }),
   },
 }))
 
 const defaultProps = {
   projectId: 'p1',
   projectName: 'test-project',
+  projectPath: '/tmp/projects/p1',
   sessionId: 's1',
   engine: 'claude' as const,
   model: 'Claude Opus 4.8',
   sessions: [],
+  openSessionIds: [],
   chrome: null,
   onSelectSession: vi.fn(),
+  onCloseSessionTab: vi.fn(),
   onNewSession: vi.fn(),
   onBack: vi.fn(),
   onNewProject: vi.fn(),
   onRename: vi.fn(),
+  onPatchSession: vi.fn(),
+  onDeleteSession: vi.fn(),
 }
 
 describe('Workspace', () => {
   it('进会话后渲染历史消息', async () => {
     render(<SettingsProvider><Workspace {...defaultProps} /></SettingsProvider>)
-    expect(await screen.findByText('历史消息')).toBeInTheDocument()
+    // 顶部「最近发送」固定条会复制最后一条 user 文本 → 消息体 + 固定条共两处
+    expect((await screen.findAllByText('历史消息')).length).toBeGreaterThan(0)
   })
 
   it('SSE message 事件实时增量渲染', async () => {
     render(<SettingsProvider><Workspace {...defaultProps} /></SettingsProvider>)
     // 等历史加载完（attached=true，SSE fetch 已发起）
-    expect(await screen.findByText('历史消息')).toBeInTheDocument()
+    expect((await screen.findAllByText('历史消息')).length).toBeGreaterThan(0)
     await act(async () => {})
     act(() => {
       emitSse('message', { type: 'message', text: '实时答复' })
@@ -105,7 +118,7 @@ describe('Workspace', () => {
     ]
     render(<SettingsProvider><Workspace {...defaultProps} sessions={sessions} /></SettingsProvider>)
     // ChatHeader renders hist-count badge (should show done count)
-    await screen.findByText('历史消息')
+    await screen.findAllByText('历史消息')
     // hist-count visible with at least one done session
     const histCount = document.querySelector('#histCount')
     expect(histCount).toBeTruthy()
@@ -113,7 +126,7 @@ describe('Workspace', () => {
 
   it('含 .split 容器 + .split-handle + Composer + file-workspace 占位', async () => {
     const { container } = render(<SettingsProvider><Workspace {...defaultProps} /></SettingsProvider>)
-    await screen.findByText('历史消息')
+    await screen.findAllByText('历史消息')
     expect(container.querySelector('.split')).toBeTruthy()
     expect(container.querySelector('.split-handle')).toBeTruthy()
     // Task 15: 占位 div 已替换为真实 Composer（根 .composer，含 textarea）

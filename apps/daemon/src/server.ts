@@ -38,6 +38,8 @@ export interface StartDaemonOptions {
   webDir?: string
   /** 提供则启用宽门 token gate：所有 /api/* 请求须带 AUTH_HEADER=该值，否则 503。缺省不 gate（dev/测试）。 */
   authSecret?: string
+  /** 测试注入：transcript 文件目录；缺省用 sessionsDir()。 */
+  transcriptDir?: string
 }
 
 export async function startDaemon(opts: StartDaemonOptions = {}): Promise<DaemonServer> {
@@ -65,8 +67,25 @@ export async function startDaemon(opts: StartDaemonOptions = {}): Promise<Daemon
       const got = Buffer.from(raw, 'utf8')
       return got.length === secretBuf.length && timingSafeEqual(got, secretBuf)
     }
+    // 取凭证：优先请求头（renderer fetch 注入）；其次 cookie——浏览器发起的 <img>/<iframe> 及其
+    // 相对子资源请求带不了自定义头，但同源会自动带 cookie，文件流路由（/api/pf/*）靠它过门。
+    const credOf = (req: express.Request): string => {
+      const h = req.header(AUTH_HEADER)
+      if (h) return h
+      const cookie = req.header('cookie')
+      if (cookie) {
+        for (const part of cookie.split(';')) {
+          const eq = part.indexOf('=')
+          if (eq === -1) continue
+          if (part.slice(0, eq).trim() === AUTH_HEADER) {
+            try { return decodeURIComponent(part.slice(eq + 1).trim()) } catch { return part.slice(eq + 1).trim() }
+          }
+        }
+      }
+      return ''
+    }
     app.use((req, res, next) => {
-      if (req.isApi && tokenOk(req.header(AUTH_HEADER) ?? '')) return next()
+      if (req.isApi && tokenOk(credOf(req))) return next()
       if (req.isApi) return res.status(503).json(apiErr(AUTH_PENDING_CODE, '桌面授权未就绪'))
       if (opts.webDir && req.method === 'GET') return res.sendFile('index.html', { root: opts.webDir })
       return res.status(503).json(apiErr(AUTH_PENDING_CODE, '桌面授权未就绪'))
@@ -75,13 +94,14 @@ export async function startDaemon(opts: StartDaemonOptions = {}): Promise<Daemon
 
   const db = opts.db ?? openDatabase()
   const ownDb = opts.db === undefined   // 自己建的才负责在 close 时关闭
-  const store = makeConfigStore(configPath(), { projectsDir: defaultProjectsDir(), skillsDir: defaultSkillsDir() })
+  const store = makeConfigStore(configPath(), { projectsDir: defaultProjectsDir(), skillsDir: defaultSkillsDir(), debugMode: false })
   // opts 覆盖（测试注入）：提供则该字段恒用 opts 值，不落 config 文件
   const readConfig = () => {
     const c = store.read()
     return {
       projectsDir: opts.projectsDir ?? c.projectsDir,
       skillsDir: opts.skillsDir ?? c.skillsDir,
+      debugMode: c.debugMode,
     }
   }
   const writeConfig = (p: Parameters<typeof store.write>[0]) => { store.write(p); return readConfig() }
@@ -91,7 +111,7 @@ export async function startDaemon(opts: StartDaemonOptions = {}): Promise<Daemon
     return found
   }
   const runtime = opts.runtime ?? new SessionRuntime({ db, resolveBin })
-  app.use('/', createApiRouter({ db, runtime, readConfig, writeConfig, detect }))
+  app.use('/', createApiRouter({ db, runtime, readConfig, writeConfig, detect, transcriptDir: opts.transcriptDir }))
 
   app.get('/health', (_req, res) => {
     res.json({ status: 'ok' })

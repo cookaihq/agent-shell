@@ -23,7 +23,7 @@ test('Enter 发送非空文本 → onSend + 清空', async () => {
   const ta = screen.getByPlaceholderText(/描述你想让 agent 做的事/)
   await userEvent.type(ta, '写一个登录页')
   await userEvent.keyboard('{Enter}')
-  expect(props.onSend).toHaveBeenCalledWith('写一个登录页')
+  expect(props.onSend).toHaveBeenCalledWith('写一个登录页', [])
   expect((ta as HTMLTextAreaElement).value).toBe('')
 })
 test('空文本不发送', async () => {

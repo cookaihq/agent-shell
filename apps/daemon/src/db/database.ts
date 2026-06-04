@@ -1,12 +1,12 @@
 import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
 import Database from 'better-sqlite3'
+import { channelDataDir } from '../paths'
 import { initSchema } from './schema'
 
-/** 默认数据库路径：~/.agent-shell/app.sqlite（路径不嵌端口，MVP §4.1）。 */
+/** 默认数据库路径：{channelDataDir}/app.sqlite（渠道数据目录见 paths.ts）。 */
 export function defaultDbPath(): string {
-  return path.join(os.homedir(), '.agent-shell', 'app.sqlite')
+  return path.join(channelDataDir(), 'app.sqlite')
 }
 
 /** 开库 + 建表。path 默认 defaultDbPath()，传 ':memory:' 用于测试。 */

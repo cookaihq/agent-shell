@@ -27,6 +27,7 @@ vi.mock('../api/client', () => ({
     resume: vi.fn(),
     interrupt: vi.fn(),
     submit: vi.fn(),
+    getConfig: vi.fn().mockResolvedValue({ projectsDir: '/p', skillsDir: '/s' }),
   },
 }))
 

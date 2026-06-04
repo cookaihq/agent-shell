@@ -9,6 +9,8 @@ export interface BuildArgsOpts {
   sandbox?: string
   /** 引擎侧 resume 指针（claude session_id / codex thread_id）。有则起进程时拼 resume 旗标。 */
   resumableId?: string
+  /** 需授权读取的项目外目录集（消息附件引用项目外路径时）：claude → --add-dir 逐个；codex → 放行读取旗标。 */
+  addDirs?: string[]
 }
 
 /** 该引擎的凭证环境变量名（env 净化用）。 */
@@ -38,8 +40,12 @@ export interface RuntimeAgentDef {
   buildArgs(opts: BuildArgsOpts): string[]
   /** 把 prompt 文本编码成要写入 stdin 的确切字节。 */
   formatPrompt(text: string): string
-  /** M2 逐行入口：一行原始 JSONL → 0..n 个内部事件。 */
+  /** M2 逐行入口：一行原始 JSONL → 0..n 个内部事件。无状态，逐行独立。 */
   parseLine(line: string): AgentEvent[]
+  /** （可选）建一个持有 per-run 状态的逐行解析器——用于需跨行累计的引擎（如 claude 流式 progress：边收 delta 边估算 token + 算当前动作）。
+   *  提供时，调度器每个 turn 起一个实例并优先用它替代无状态 parseLine；不提供（如 codex）则仍走 parseLine。
+   *  不改 parseLine 的通用签名，保持调度器引擎无关（按 def 多态，不硬编码引擎名）。 */
+  createParser?(): (line: string) => AgentEvent[]
   /** 从一行原始 JSONL 嗅探引擎侧 resume 指针（claude session_id / codex thread_id）。无则 undefined。 */
   extractResumableId(line: string): string | undefined
 }

@@ -1,14 +1,24 @@
 // Home.tsx — 入口屏，对照 home.html L19-53
-import { useState } from 'react'
+import { useState, useCallback } from 'react'
 import type { ProjectDTO } from '../api/types'
 import { ProjectCard } from './ProjectCard'
 import { IconPaperclip } from '../ui/icons'
+import { AttachBar, type AttachChip } from '../workspace/AttachBar'
+import type { AgentShellBridge } from '@agent-shell/contracts'
 
 const RECENT_LIMIT = 4
 
+/** 首页暂存附件：无项目，先存「磁盘路径」或「剪贴板 blob」，提交时由 AppNav 落盘到 attachments/。 */
+export type HomeAttachment =
+  | { kind: 'path'; path: string; name: string; isDir: boolean }
+  | { kind: 'blob'; blob: Blob; name: string }
+
+function basename(p: string): string { return p.split(/[\\/]/).filter(Boolean).pop() ?? p }
+function guessIsDir(p: string): boolean { return !/\.[^./\\]+$/.test(basename(p)) }
+
 interface HomeProps {
   projects: ProjectDTO[]
-  onSend: (text: string) => void
+  onSend: (text: string, staged: HomeAttachment[]) => void
   onOpenProject: (id: string) => void
   onViewAll: () => void
   skillCount: number
@@ -17,17 +27,43 @@ interface HomeProps {
 
 export function Home({ projects, onSend, onOpenProject, onViewAll, skillCount, onOpenSkillModal }: HomeProps) {
   const [text, setText] = useState('')
+  const [staged, setStaged] = useState<HomeAttachment[]>([])
 
   const send = () => {
     const t = text.trim()
-    if (!t) return
-    onSend(t)
+    if (!t && staged.length === 0) return
+    onSend(t, staged)
     setText('')
+    setStaged([])
   }
+
+  // 回形针：原生选择器拿绝对路径（文件/文件夹/多选），暂存不落盘
+  const pickAttachments = useCallback(async () => {
+    const bridge = (globalThis as { agentShell?: AgentShellBridge }).agentShell
+    if (!bridge) return
+    const paths = await bridge.pickPaths()
+    if (paths.length === 0) return
+    setStaged((prev) => [...prev, ...paths.map((p): HomeAttachment => ({ kind: 'path', path: p, name: basename(p), isDir: guessIsDir(p) }))])
+  }, [])
+
+  // 粘贴：剪贴板字节无源路径 → 暂存 blob，提交时上传
+  const onPaste = useCallback((e: React.ClipboardEvent) => {
+    const items = e.clipboardData?.items
+    if (!items) return
+    for (const it of Array.from(items)) {
+      if (it.kind !== 'file') continue
+      const f = it.getAsFile()
+      if (f) setStaged((prev) => [...prev, { kind: 'blob', blob: f, name: f.name || `pasted-${f.type.split('/')[1] || 'bin'}` }])
+    }
+  }, [])
+
+  const removeStaged = useCallback((idx: number) => setStaged((prev) => prev.filter((_, i) => i !== idx)), [])
 
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
   }
+
+  const chips: AttachChip[] = staged.map((s) => ({ name: s.name, kind: s.kind === 'path' && s.isDir ? 'dir' : 'file' }))
 
   return (
     <div className="home">
@@ -50,10 +86,12 @@ export function Home({ projects, onSend, onOpenProject, onViewAll, skillCount, o
             value={text}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={onKeyDown}
+            onPaste={onPaste}
           />
+          {staged.length > 0 && <AttachBar attachments={chips} onRemove={removeStaged} />}
           <div className="hero-foot">
             <div className="foot-left">
-              <button className="attach" title="附加文件"><IconPaperclip size={17} /></button>
+              <button className="attach" title="附加文件" type="button" onClick={() => void pickAttachments()}><IconPaperclip size={17} /></button>
               <div className="skill-inject">
                 <button
                   className={`skill-inject-btn${skillCount > 0 ? ' has' : ''}`}

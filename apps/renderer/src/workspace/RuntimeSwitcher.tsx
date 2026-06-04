@@ -9,7 +9,9 @@
  */
 
 import React, { useEffect, useRef, useState } from 'react'
-import { useRuntime, CLI_MODELS, AGENT_LABEL } from './runtimeState'
+import { api } from '../api/client'
+import { useRuntime, CLI_MODELS, AGENT_LABEL, modelLabel } from './runtimeState'
+import type { DynModel } from './ModelPill'
 import { EngIcon } from '../ui/icons'
 import { useSettings } from '../settings/SettingsContext'
 
@@ -19,10 +21,12 @@ const AGENT_ICON_BG: Record<string, string> = {
   codex: 'var(--blue)',
 }
 
-export function RuntimeSwitcher() {
+export function RuntimeSwitcher({ sessionId }: { sessionId?: string } = {}) {
   const { runtime, dispatch } = useRuntime()
   const { openSettings } = useSettings()
   const [open, setOpen] = useState(false)
+  // 动态模型列表（claude）：来自活动会话 supportedModels；null=无活会话 → 回落静态 CLI_MODELS（Issue 12）
+  const [dynModels, setDynModels] = useState<DynModel[] | null>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
 
   // 点外部关闭（移植 wirePopover 外部 click + L328-333）
@@ -36,12 +40,24 @@ export function RuntimeSwitcher() {
     return () => document.removeEventListener('click', handler)
   }, [])
 
+  // 打开弹窗时拉一次 supportedModels（仅 claude 有活动会话）
+  useEffect(() => {
+    if (!open || !sessionId || runtime.agent !== 'claude') return
+    let off = false
+    api.models(sessionId).then((r) => { if (!off) setDynModels(r.models) }).catch(() => {})
+    return () => { off = true }
+  }, [open, sessionId, runtime.agent])
+
   const toggleOpen = (e: React.MouseEvent) => {
     e.stopPropagation()
     setOpen(prev => !prev)
   }
 
-  const modelList = CLI_MODELS[runtime.agent] ?? []
+  // claude 有动态模型 → 用 {value,displayName}；否则回落静态展示名
+  const dynamic = runtime.agent === 'claude' && dynModels && dynModels.length > 0 ? dynModels : null
+  const modelList: { value: string; label: string }[] = dynamic
+    ? dynamic.map((m) => ({ value: m.value, label: m.displayName }))
+    : (CLI_MODELS[runtime.agent] ?? []).map((m) => ({ value: m.value, label: m.label }))
 
   return (
     <div className="inline-switcher" ref={wrapRef}>
@@ -74,7 +90,7 @@ export function RuntimeSwitcher() {
           <span className="isw-sep">·</span>
           <span className="isw-primary" id="chipPrimary">{AGENT_LABEL[runtime.agent] ?? runtime.agent}</span>
           <span className="isw-sep">·</span>
-          <span className="isw-model" id="chipModel">{runtime.model}</span>
+          <span className="isw-model" id="chipModel">{modelLabel(runtime.agent, runtime.model, dynModels)}</span>
         </span>
         <span className="isw-chev">⌄</span>
       </button>
@@ -124,7 +140,7 @@ export function RuntimeSwitcher() {
               }}
             >
               {modelList.map(m => (
-                <option key={m} value={m}>{m}</option>
+                <option key={m.value} value={m.value}>{m.label}</option>
               ))}
             </select>
           </div>

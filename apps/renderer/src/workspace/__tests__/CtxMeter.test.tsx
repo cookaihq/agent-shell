@@ -34,16 +34,16 @@ describe('CtxMeter', () => {
     expect(pop?.getAttribute('hidden')).toBeNull()
   })
 
-  it('弹窗显示输入 token（格式化 48.2k）', () => {
+  it('弹窗显示输入 token（格式化 48.2K）', () => {
     const { container } = render(<CtxMeter usage={usage} />)
     fireEvent.click(container.querySelector('.ctx-meter') as HTMLElement)
-    expect(screen.getByText('48.2k tokens')).toBeInTheDocument()
+    expect(screen.getByText('48.2K tokens')).toBeInTheDocument()
   })
 
-  it('弹窗显示输出 token（格式化 12.1k）', () => {
+  it('弹窗显示输出 token（格式化 12.1K）', () => {
     const { container } = render(<CtxMeter usage={usage} />)
     fireEvent.click(container.querySelector('.ctx-meter') as HTMLElement)
-    expect(screen.getByText('12.1k tokens')).toBeInTheDocument()
+    expect(screen.getByText('12.1K tokens')).toBeInTheDocument()
   })
 
   it('弹窗显示费用（≈ $0.41）', () => {
@@ -81,5 +81,23 @@ describe('CtxMeter', () => {
     expect(btn.classList.contains('is-open')).toBe(true)
     fireEvent.click(btn)
     expect(btn.classList.contains('is-open')).toBe(false)
+  })
+
+  it('Issue 10：运行中 liveTokens 实时近似——新会话(usage=0)也显示实时输出 + 「实时」标记，不再停在 0', () => {
+    // 新会话：还没有 result，usage 全 0；运行中 progress 估算 4100 tokens
+    const { container } = render(<CtxMeter usage={{ inputTokens: 0, outputTokens: 0, costUsd: 0 }} liveTokens={4100} />)
+    fireEvent.click(container.querySelector('.ctx-meter') as HTMLElement)
+    // 「本次会话」标题带「实时」标记
+    expect(container.querySelector('.ctx-pop-h .ctx-live')).toBeTruthy()
+    // 输出反映实时估算（4.1K），而非 0
+    expect(screen.getByText('4.1K tokens')).toBeInTheDocument()
+    // 上下文「已用」也随实时动（不再是「已用 0」）
+    expect(container.querySelector('.ctx-bar span')?.getAttribute('style')).not.toContain('width: 0%')
+  })
+
+  it('非运行中（无 liveTokens）：不显示「实时」标记，按 usage 落库值', () => {
+    const { container } = render(<CtxMeter usage={usage} />)
+    fireEvent.click(container.querySelector('.ctx-meter') as HTMLElement)
+    expect(container.querySelector('.ctx-pop-h .ctx-live')).toBeNull()
   })
 })

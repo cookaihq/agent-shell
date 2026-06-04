@@ -41,6 +41,9 @@ export function CtxFile({ activeFile }: CtxFileProps) {
   }
 
   const isOff = ctxExcluded.has(activeFile)
+  // chip 只显示纯文件名（Issue 27）；完整相对路径放进 title，hover 仍可见
+  const baseName = activeFile.split('/').pop() || activeFile
+  const ctxHint = isOff ? '已移出上下文，点击加回' : '此文件已在上下文中，点击移出'
 
   const toggle = () => {
     setCtxExcluded(prev => {
@@ -55,12 +58,12 @@ export function CtxFile({ activeFile }: CtxFileProps) {
     <button
       className={`ctx-file${isOff ? ' is-off' : ''}`}
       type="button"
-      title={isOff ? '已移出上下文，点击加回' : '此文件已在上下文中，点击移出'}
+      title={`${activeFile} · ${ctxHint}`}
       onClick={toggle}
     >
       <span className="cf-sep" />
       <FileIc />
-      <span className="cf-name">{activeFile}</span>
+      <span className="cf-name">{baseName}</span>
     </button>
   )
 }

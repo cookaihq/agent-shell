@@ -35,6 +35,13 @@ describe('daemon token gate（条件启用）', () => {
     expect(res.status).toBe(503)
   })
 
+  it('配了 authSecret：带 cookie 凭证 → 放行（供 <img>/<iframe> 等带不了头的同源请求过门）', async () => {
+    server = await startDaemon({ detect, db: openDatabase(':memory:'), authSecret: SECRET })
+    const res = await fetch(server.url + '/api/health', { headers: { cookie: `${AUTH_HEADER}=${encodeURIComponent(SECRET)}` } })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ status: 'ok' })
+  })
+
   it('配了 authSecret：静态资源/SPA 非 /api 无 token 也放行（否则页面加载不出）', async () => {
     const fs = await import('node:fs'); const os = await import('node:os'); const path = await import('node:path')
     const webDir = fs.mkdtempSync(path.join(os.tmpdir(), 'm8b-web-'))

@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { AUTH_HEADER, type AgentShellBridge } from '@agent-shell/contracts'
+import { AUTH_HEADER, AgentEvent as AgentEventSchema, type AgentShellBridge } from '@agent-shell/contracts'
 import type { AgentEvent } from '../api/types'
 
 // 为什么不用 EventSource：daemon 对所有 /api/* 设了「宽门 token gate」（server.ts），请求须带 AUTH_HEADER，
@@ -7,7 +7,11 @@ import type { AgentEvent } from '../api/types'
 // 改用 fetch + body.getReader() 手动读 SSE（fetch 能带头，复用 client.ts 同款 token 注入），与其余接口走同一鉴权路径。
 // 借鉴 open-design apps/web/src/providers/api-proxy.ts 的流式消费方式。
 
-const EVENT_TYPES = new Set<AgentEvent['type']>(['message', 'thinking', 'tool_use', 'tool_result', 'usage', 'turn_end'])
+// 从 AgentEvent 契约直接派生白名单——避免手维护列表与契约漂移（漏了 permission_request /
+// ask_user_question / permission_resolved 会导致交互卡片永不出现、canUseTool 永久挂起 → 卡死）。
+const EVENT_TYPES = new Set<string>(
+  AgentEventSchema.options.map((o) => (o.shape.type as { value: string }).value),
+)
 
 /** 解析一帧 SSE（event: / data: 行）→ {event, data}；缺任一者（如 `: connected` 注释帧）→ null。 */
 function parseFrame(frame: string): { event: string; data: string } | null {
@@ -42,7 +46,7 @@ async function pump(sessionId: string, signal: AbortSignal, dispatch: (ev: Agent
       const frame = buf.slice(0, m.index)
       buf = buf.slice(m.index + m[0].length)
       const parsed = parseFrame(frame)
-      if (!parsed || !EVENT_TYPES.has(parsed.event as AgentEvent['type'])) continue
+      if (!parsed || !EVENT_TYPES.has(parsed.event)) continue
       try { dispatch(JSON.parse(parsed.data) as AgentEvent) } catch { /* 坏帧跳过 */ }
     }
   }

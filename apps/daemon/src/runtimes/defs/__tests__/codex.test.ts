@@ -48,4 +48,17 @@ describe('codexDef', () => {
     expect(args).toEqual(['exec', '--json', '--skip-git-repo-check', '-m', 'gpt-5', '-s', 'workspace-write', '-'])
     expect(args).not.toContain('resume')
   })
+
+  it('buildArgs：addDirs 非空 → 加 -c sandbox_permissions 放行项目外读取（V1 兜底 disk-full-read-access）', () => {
+    const args = codexDef.buildArgs({ model: 'gpt-5', sandbox: 'workspace-write', addDirs: ['/ext/a'] })
+    expect(args).toEqual([
+      'exec', '--json', '--skip-git-repo-check', '-m', 'gpt-5', '-s', 'workspace-write',
+      '-c', 'sandbox_permissions=["disk-full-read-access"]', '-',
+    ])
+  })
+
+  it('buildArgs：addDirs 空 → 不加 sandbox_permissions', () => {
+    const args = codexDef.buildArgs({ model: 'gpt-5', addDirs: [] })
+    expect(args).not.toContain('-c')
+  })
 })

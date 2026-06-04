@@ -50,6 +50,22 @@ describe('useAgentStream', () => {
     ])
   })
 
+  it('分发交互事件 permission_request / ask_user_question / permission_resolved（白名单从契约派生，不漏）', async () => {
+    fetchMock.mockImplementationOnce(async () => ({
+      ok: true,
+      body: streamBody([
+        sse('permission_request', { type: 'permission_request', requestId: 'r1', toolName: 'Write', input: {} }),
+        sse('ask_user_question', { type: 'ask_user_question', requestId: 'q1', questions: [] }),
+        sse('permission_resolved', { type: 'permission_resolved', requestId: 'r1', outcome: 'allow' }),
+        sse('turn_end', { type: 'turn_end', stopReason: 'end_turn' }),
+      ]),
+    }) as unknown as Response)
+    const evs: { type: string }[] = []
+    renderHook(() => useAgentStream('s1', (e) => evs.push(e as { type: string }), true))
+    await waitFor(() => expect(evs).toHaveLength(4))
+    expect(evs.map((e) => e.type)).toEqual(['permission_request', 'ask_user_question', 'permission_resolved', 'turn_end'])
+  })
+
   it('有 bridge token 时带 AUTH_HEADER 请求头', async () => {
     ;(globalThis as { agentShell?: unknown }).agentShell = { authToken: 'tok123' }
     renderHook(() => useAgentStream('s1', () => {}, true))

@@ -1,48 +1,41 @@
 /**
- * AttachBar.tsx — Task 18
+ * AttachBar.tsx — 消息附件预览栏
  *
- * 附件预览栏。移植 app.js 附件 (L637-658)。
- * 前端态，不上传；submit 不带附件。上传/组装=后续子里程碑。
+ * 统一显示「图标 + 名」（去掉缩略图，对齐 V1 减法 + open-design）；文件夹用文件夹图标。
+ * 承载首页/工作区两种暂存项的展示，数据形态各自维护，这里只要 {name, kind}。
  *
- * 结构（对齐原型）：
- *   .attach-bar > .attach-chip* > .ac-thumb(图片) | .ac-ic(文件图标) + .ac-name + .ac-x
+ * 结构（对齐原型）：.attach-bar > .attach-chip* > .ac-ic + .ac-name + .ac-x
  */
-import type { AttachedFile } from './Composer'
 
-// 文件图标 SVG（来自 app.js L643）
+/** 一个附件 chip 的显示数据。 */
+export interface AttachChip { name: string; kind: 'file' | 'dir' }
+
 const FileIcon = () => (
   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
     <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
     <path d="M14 2v6h6" />
   </svg>
 )
+const DirIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+    <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+  </svg>
+)
 
 interface AttachBarProps {
-  attachments: AttachedFile[]
+  attachments: AttachChip[]
   onRemove: (idx: number) => void
 }
 
 export function AttachBar({ attachments, onRemove }: AttachBarProps) {
+  if (attachments.length === 0) return <div className="attach-bar" />
   return (
     <div className="attach-bar">
       {attachments.map((a, i) => (
         <span key={i} className="attach-chip">
-          {a.isImage ? (
-            <img className="ac-thumb" src={a.objectUrl} alt="" />
-          ) : (
-            <span className="ac-ic">
-              <FileIcon />
-            </span>
-          )}
-          <span className="ac-name">{a.file.name || '粘贴图片.png'}</span>
-          <button
-            className="ac-x"
-            title="移除"
-            type="button"
-            onClick={() => onRemove(i)}
-          >
-            ×
-          </button>
+          <span className="ac-ic">{a.kind === 'dir' ? <DirIcon /> : <FileIcon />}</span>
+          <span className="ac-name">{a.name}</span>
+          <button className="ac-x" title="移除" type="button" onClick={() => onRemove(i)}>×</button>
         </span>
       ))}
     </div>

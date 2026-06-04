@@ -9,9 +9,10 @@ const dir = path.dirname(fileURLToPath(import.meta.url))
 const fixture = (p: string) => fs.readFileSync(path.join(dir, '../__fixtures__', p), 'utf8')
 
 describe('parseStream', () => {
-  it('claude/tools 全链归一序列', () => {
+  it('claude/tools 全链归一序列（最终空 thinking 块跳过）', () => {
     const ev = parseStream(fixture('claude/tools.jsonl'), 'claude')
-    expect(ev.map((e) => e.type)).toEqual(['thinking', 'tool_use', 'tool_result', 'message', 'usage', 'turn_end'])
+    // tools.jsonl 最终 assistant 的 thinking 块为空串（真文本在 thinking_delta 流式累计）→ 跳过空块
+    expect(ev.map((e) => e.type)).toEqual(['tool_use', 'tool_result', 'message', 'usage', 'turn_end'])
     ev.forEach((e) => expect(() => AgentEvent.parse(e)).not.toThrow())
   })
 

@@ -47,19 +47,38 @@ describe('runTurn', () => {
     expect(JSON.parse(cp.stdinWrites.join('').trim())).toMatchObject({ type: 'user' })
     expect(cp.stdinEnded).toBe(false)
 
-    // stdout 分块到达：assistant 行被切成两块，result 行无末尾换行
-    const assistant = JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'yo' }] } })
+    // stdout 分块到达：assistant 行被切成两块，result 行无末尾换行。
+    // 用 tool_use 块验证行缓冲（正文 text 已改为走 text_delta 流式 + 对最终 assistant 的 text 去重过滤）。
+    const assistant = JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't1', name: 'Read', input: { file_path: 'a' } }] } })
     const result = JSON.stringify({ type: 'result', stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 2 } })
     cp.stdout.emit('data', assistant.slice(0, 10))
     cp.stdout.emit('data', assistant.slice(10) + '\n' + result)   // result 无末尾 \n
     // 'exit' 不应触发收尾——Node 里 'exit' 时 stdout 可能还没排干；调度器只在 'close' flush
     cp.emit('exit', 0, null)
-    expect(events.map((e) => e.type)).toEqual(['message'])   // 仅完整行的 message，终结行还压在 buffer
+    expect(events.map((e) => e.type)).toEqual(['tool_use'])   // 仅完整行的 tool_use，终结行还压在 buffer
     cp.emit('close', 0, null)   // 'close' 保证 stdio 排干后触发 → flush 残留的 result 行
 
     await done
-    expect(events.map((e) => e.type)).toEqual(['message', 'usage', 'turn_end'])
-    expect(events[0]).toMatchObject({ type: 'message', text: 'yo' })
+    expect(events.map((e) => e.type)).toEqual(['tool_use', 'usage', 'turn_end'])
+    expect(events[0]).toMatchObject({ type: 'tool_use', name: 'Read' })
+  })
+
+  it('claude：stream_event 行经 per-run createParser 流出 progress（接线验证——不再被无状态 parseLine 丢弃）', async () => {
+    const cp = fakeChild()
+    const events: AgentEvent[] = []
+    const { done } = runTurn({
+      engine: 'claude', binPath: '/abs/claude', cwd: '/work', model: 'opus',
+      prompt: 'hi', baseEnv: { PATH: '/usr/bin' }, onEvent: (e) => events.push(e), spawnFn: (() => cp) as any,
+    })
+    // 流式：thinking 块开始 + thinking_delta（estimated_tokens=40）
+    cp.stdout.emit('data',
+      JSON.stringify({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'thinking' } } }) + '\n' +
+      JSON.stringify({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'x', estimated_tokens: 40 } } }) + '\n')
+    cp.emit('close', 0, null)
+    await done
+    const prog = events.filter((e) => e.type === 'progress') as Extract<AgentEvent, { type: 'progress' }>[]
+    expect(prog.length).toBeGreaterThan(0)
+    expect(prog.at(-1)).toMatchObject({ type: 'progress', tokens: 40, activity: { kind: 'thinking' } })
   })
 
   it('codex：prompt 写成 text 并关 stdin（单次）→ 收事件', async () => {

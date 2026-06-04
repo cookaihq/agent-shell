@@ -25,4 +25,11 @@ describe('config store', () => {
     const store = makeConfigStore(file, { projectsDir: '/d/projects', skillsDir: '/d/skills' })
     expect(store.read()).toEqual({ projectsDir: '/d/projects', skillsDir: '/d/skills' })
   })
+  it('debugMode 往返 + 缺省 false', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-cfg-'))
+    const store = makeConfigStore(path.join(dir, 'config.json'), { projectsDir: '/p', skillsDir: '/s', debugMode: false })
+    expect(store.read().debugMode).toBe(false)
+    store.write({ debugMode: true })
+    expect(store.read().debugMode).toBe(true)
+  })
 })

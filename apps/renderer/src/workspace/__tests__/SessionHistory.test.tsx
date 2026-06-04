@@ -23,6 +23,7 @@ const base = {
   onResume: vi.fn(),
   onPin: vi.fn(),
   onRename: vi.fn(),
+  onDelete: vi.fn(),
 }
 
 test('状态文案 + 运行中', () => {
@@ -142,4 +143,25 @@ test('引擎 dot 带对应 className (claude/codex)', () => {
   const dots = container.querySelectorAll('.hi-dot')
   expect(dots[0].classList.contains('claude')).toBe(true)
   expect(dots[1].classList.contains('codex')).toBe(true)
+})
+
+test('删除：点垃圾桶→出现二次确认（不直接删）；取消则不删；确认才触发 onDelete', async () => {
+  const onDelete = vi.fn()
+  render(
+    <SessionHistory {...base} onDelete={onDelete} sessions={[sess('1', 'completed')]} />
+  )
+  // 初始无确认条
+  expect(screen.queryByText(/不可恢复/)).not.toBeInTheDocument()
+  // 点垃圾桶 → 出现确认条，未直接删
+  await userEvent.click(screen.getByTitle('删除会话'))
+  expect(screen.getByText(/不可恢复/)).toBeInTheDocument()
+  expect(onDelete).not.toHaveBeenCalled()
+  // 取消 → 回正常态，不删
+  await userEvent.click(screen.getByText('取消'))
+  expect(screen.queryByText(/不可恢复/)).not.toBeInTheDocument()
+  expect(onDelete).not.toHaveBeenCalled()
+  // 再删 → 确认 → onDelete(id)
+  await userEvent.click(screen.getByTitle('删除会话'))
+  await userEvent.click(screen.getByText('删除'))
+  expect(onDelete).toHaveBeenCalledWith('1')
 })

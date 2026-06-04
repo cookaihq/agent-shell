@@ -18,16 +18,30 @@ describe('chatReducer', () => {
     expect(s.runStatus).toBe('running')
   })
 
+  it('optimisticUser 带附件 → user 消息含 attachments 块（即时 📎 回显）', () => {
+    const s = chatReducer(initialChat(), { type: 'optimisticUser', text: 'q', attachments: [{ name: 'a.png', path: 'attachments/a.png' }] })
+    expect(s.messages.at(-1)!.blocks).toEqual([
+      { type: 'text', text: 'q' },
+      { type: 'attachments', files: [{ name: 'a.png', path: 'attachments/a.png' }] },
+    ])
+  })
+
+  it('optimisticUser 无附件 → 仅 text 块（回归）', () => {
+    const s = chatReducer(initialChat(), { type: 'optimisticUser', text: 'q' })
+    expect(s.messages.at(-1)!.blocks).toEqual([{ type: 'text', text: 'q' }])
+  })
+
   it('message/thinking/tool_use 各 push 独立 live 块', () => {
     let s = chatReducer(initialChat(), { type: 'optimisticUser', text: 'q' })
     s = chatReducer(s, { type: 'event', ev: { type: 'message', text: 'A' } })
     s = chatReducer(s, { type: 'event', ev: { type: 'message', text: 'B' } })
     s = chatReducer(s, { type: 'event', ev: { type: 'tool_use', id: 't1', name: 'Read', input: {} } })
-    expect(s.liveBlocks).toEqual([
+    expect(s.liveBlocks).toMatchObject([
       { type: 'text', text: 'A' },
       { type: 'text', text: 'B' },
-      { type: 'tool_use', id: 't1', name: 'Read', input: {} },
+      { type: 'tool_use', id: 't1', name: 'Read', input: {} },   // 另带 startedAt 时间戳（计时用）
     ])
+    expect((s.liveBlocks![2] as { startedAt?: number }).startedAt).toBeTypeOf('number')
   })
 
   it('turn_end end_turn → live 并入 assistant + completed', () => {
@@ -78,4 +92,73 @@ describe('chatReducer', () => {
     expect(live.failReason).toBeUndefined()
     expect(live.liveBlocks).toEqual([{ type: 'text', text: '继续中…' }])
   })
+
+  it('progress → 存 liveProgress，不建块', () => {
+    let s = chatReducer(initialChat(), { type: 'optimisticUser', text: 'q' })
+    s = chatReducer(s, { type: 'event', ev: { type: 'progress', tokens: 42, activity: { kind: 'thinking' } } })
+    expect(s.liveProgress).toEqual({ tokens: 42, activity: { kind: 'thinking' } })
+    expect(s.liveBlocks).toEqual([])   // 进度是瞬时状态行，不该建块
+  })
+
+  it('turn_end 清空 liveProgress（状态行消失，任何 stopReason 都清）', () => {
+    let s = chatReducer(initialChat(), { type: 'optimisticUser', text: 'q' })
+    s = chatReducer(s, { type: 'event', ev: { type: 'progress', tokens: 99, activity: { kind: 'tool', tool: 'Read', target: 'a.ts' } } })
+    expect(s.liveProgress).toBeDefined()
+    s = chatReducer(s, { type: 'event', ev: { type: 'turn_end', stopReason: 'aborted' } })
+    expect(s.liveProgress).toBeUndefined()
+  })
+
+  it('permission_request → 入 pendingRequests（授权卡）；permission_resolved → 移除', () => {
+    let s = chatReducer(initialChat(), { type: 'optimisticUser', text: 'q' })
+    s = chatReducer(s, { type: 'event', ev: { type: 'permission_request', requestId: 'r1', toolName: 'Write', input: { file_path: 'a.ts' }, title: 'Claude wants to write a.ts' } })
+    expect(s.pendingRequests).toHaveLength(1)
+    expect(s.pendingRequests[0]).toMatchObject({ kind: 'permission', requestId: 'r1', toolName: 'Write' })
+    s = chatReducer(s, { type: 'event', ev: { type: 'permission_resolved', requestId: 'r1', outcome: 'allow' } })
+    expect(s.pendingRequests).toHaveLength(0)
+  })
+
+  it('ask_user_question → 入 pendingRequests（选择卡）', () => {
+    let s = chatReducer(initialChat(), { type: 'optimisticUser', text: 'q' })
+    s = chatReducer(s, { type: 'event', ev: { type: 'ask_user_question', requestId: 'q1', questions: [{ question: '选?', options: [{ label: 'A' }] }] } })
+    expect(s.pendingRequests[0]).toMatchObject({ kind: 'question', requestId: 'q1' })
+  })
+
+  it('逐字流式：message(streaming) 原地替换末尾文本块；streaming:false 定格；后续工具块另起', () => {
+    let s = chatReducer(initialChat(), { type: 'optimisticUser', text: 'q' })
+    s = chatReducer(s, { type: 'event', ev: { type: 'message', text: '你', streaming: true } })
+    s = chatReducer(s, { type: 'event', ev: { type: 'message', text: '你好', streaming: true } })
+    s = chatReducer(s, { type: 'event', ev: { type: 'message', text: '你好世界', streaming: true } })
+    // 三帧流式 → 仍只有一个文本块，内容为最新累计
+    expect(s.liveBlocks).toEqual([{ type: 'text', text: '你好世界' }])
+    s = chatReducer(s, { type: 'event', ev: { type: 'message', text: '你好世界', streaming: false } })
+    expect(s.liveBlocks).toEqual([{ type: 'text', text: '你好世界' }])
+    // 工具块 → 复位流式态；之后再流式 → 新文本块
+    s = chatReducer(s, { type: 'event', ev: { type: 'tool_use', id: 't1', name: 'Read', input: {} } })
+    s = chatReducer(s, { type: 'event', ev: { type: 'message', text: '继续', streaming: true } })
+    expect(s.liveBlocks).toMatchObject([{ type: 'text', text: '你好世界' }, { type: 'tool_use' }, { type: 'text', text: '继续' }])
+  })
+
+  it('非流式 message（无 streaming 标记）逐条追加（codex / 兼容）', () => {
+    let s = chatReducer(initialChat(), { type: 'optimisticUser', text: 'q' })
+    s = chatReducer(s, { type: 'event', ev: { type: 'message', text: 'A' } })
+    s = chatReducer(s, { type: 'event', ev: { type: 'message', text: 'B' } })
+    expect(s.liveBlocks).toEqual([{ type: 'text', text: 'A' }, { type: 'text', text: 'B' }])
+  })
+
+  it('turn_end 兜底清空挂起请求（防悬挂）', () => {
+    let s = chatReducer(initialChat(), { type: 'optimisticUser', text: 'q' })
+    s = chatReducer(s, { type: 'event', ev: { type: 'permission_request', requestId: 'r1', toolName: 'Bash', input: {} } })
+    expect(s.pendingRequests).toHaveLength(1)
+    s = chatReducer(s, { type: 'event', ev: { type: 'turn_end', stopReason: 'aborted' } })
+    expect(s.pendingRequests).toHaveLength(0)
+  })
+})
+
+it('turn_end 把 sdkMessageId 落到新生成的 assistant 消息', () => {
+  let st = initialChat()
+  st = chatReducer(st, { type: 'event', ev: { type: 'message', text: 'hi' } as any })
+  st = chatReducer(st, { type: 'event', ev: { type: 'turn_end', stopReason: 'end_turn', sdkMessageId: 'msg_77', sdkUuid: 'u77' } as any })
+  const last = st.messages.at(-1)!
+  expect(last.role).toBe('assistant')
+  expect((last as any).sdkMessageId).toBe('msg_77')
 })

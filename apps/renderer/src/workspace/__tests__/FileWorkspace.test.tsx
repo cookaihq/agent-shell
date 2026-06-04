@@ -34,6 +34,7 @@ vi.mock('../../api/client', () => ({
       content: '# Hello',
       truncated: false,
     }),
+    rawUrl: (projectId: string, p: string) => `/api/pf/${projectId}/${p}`,
     importFiles: vi.fn().mockResolvedValue({
       imported: [{ name: 'dropped.png', from: '/abs/dropped.png' }],
       tree: [{ name: 'dropped.png', path: 'dropped.png', type: 'file' }],
@@ -205,6 +206,35 @@ describe('FileWorkspace', () => {
     await waitFor(() => {
       const viewTab = container.querySelector('.fw-tab[data-fw="preview"]')
       expect(viewTab?.textContent).toContain('预览')
+    })
+  })
+
+  describe('运行命令 tab（openCmd）', () => {
+    const cmd = { id: 't1', command: 'ls -la /tmp', output: 'total 0\nfoo', ok: true }
+
+    it('传入 openCmd → 开命令 tab + 命令预览显示完整命令与输出', async () => {
+      const { container, rerender } = render(<FileWorkspace projectId="p1" onActiveFile={vi.fn()} openCmd={null} />)
+      await waitFor(() => expect(container.querySelector('.fw')).toBeTruthy())
+      rerender(<FileWorkspace projectId="p1" onActiveFile={vi.fn()} openCmd={{ cmd, seq: 1 }} />)
+      await waitFor(() => {
+        // 命令 tab 出现（$ 前缀）
+        expect(container.querySelector('.fw-ftab-cmd')).toBeTruthy()
+        // 命令预览渲染完整命令 + 输出
+        expect(screen.getByText('ls -la /tmp')).toBeInTheDocument()
+        expect(screen.getByText(/total 0/)).toBeInTheDocument()
+      })
+    })
+
+    it('× 关命令 tab → 回文件浏览器', async () => {
+      const { container, rerender } = render(<FileWorkspace projectId="p1" onActiveFile={vi.fn()} openCmd={null} />)
+      await waitFor(() => expect(container.querySelector('.fw')).toBeTruthy())
+      rerender(<FileWorkspace projectId="p1" onActiveFile={vi.fn()} openCmd={{ cmd, seq: 1 }} />)
+      await waitFor(() => expect(container.querySelector('.fw-ftab-cmd')).toBeTruthy())
+      fireEvent.click(container.querySelector('.fw-ftab-cmd .ftab-x') as HTMLElement)
+      await waitFor(() => {
+        expect(container.querySelector('.fw-ftab-cmd')).toBeFalsy()
+        expect(container.querySelector('.fw-panel[data-fw="files"]')?.classList.contains('is-active')).toBe(true)
+      })
     })
   })
 

@@ -2,8 +2,6 @@ import { app, dialog, Notification, shell } from 'electron'
 import electronUpdater from 'electron-updater'
 import { CHECK_INTERVAL_MS, createVersionPromptGate, nextBackoffDelay } from './updater-policy'
 
-const { autoUpdater } = electronUpdater
-
 // mac 未签名不能自动更新（spec §10-#2）→ 引导用户到 Releases 页手动下载。
 // 公开镜像仓 Releases 页（与 apps/desktop/electron-builder.yml 的 publish 保持一致）。
 const RELEASES_PAGE = 'https://github.com/cookaihq/agent-shell/releases/latest'
@@ -22,6 +20,11 @@ const RELEASES_PAGE = 'https://github.com/cookaihq/agent-shell/releases/latest'
  */
 export function initUpdater(): void {
   if (!app.isPackaged) return // dev 不查更新
+
+  // 守卫之后才解构 autoUpdater：electron-updater 的该 getter 会急切构造 MacUpdater，
+  // 并访问 require('electron').autoUpdater（原生 Squirrel）。放在守卫后，dev 态彻底不碰
+  // electron-updater；也使本模块可在 Electron 运行时之外被 import 而不崩（顶层无副作用）。
+  const { autoUpdater } = electronUpdater
 
   const promptGate = createVersionPromptGate()
   let failureStreak = 0

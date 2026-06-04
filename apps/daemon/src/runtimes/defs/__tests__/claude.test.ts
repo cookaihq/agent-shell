@@ -11,19 +11,28 @@ describe('claudeDef', () => {
     expect(claudeDef.authStrategy).toEqual({ apiKeyEnv: 'ANTHROPIC_API_KEY', baseUrlEnv: 'ANTHROPIC_BASE_URL' })
   })
 
-  it('buildArgs：stream-json 进出 + verbose + model', () => {
+  it('buildArgs：stream-json 进出 + verbose + model + 写死 bypassPermissions', () => {
     expect(claudeDef.buildArgs({ model: 'opus' })).toEqual([
       '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
       '--include-partial-messages',
-      '--model', 'opus',
+      '--model', 'opus', '--permission-mode', 'bypassPermissions',
     ])
   })
 
-  it('buildArgs：给了 permissionMode → 追加 --permission-mode', () => {
+  it('buildArgs：无条件写死 --permission-mode bypassPermissions（忽略 opts.permissionMode）', () => {
+    // headless 下没授权通道，default 会自动拒写操作；对齐 open-design 一律 bypass
     expect(claudeDef.buildArgs({ model: 'opus', permissionMode: 'plan' })).toEqual([
       '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
       '--include-partial-messages',
-      '--model', 'opus', '--permission-mode', 'plan',
+      '--model', 'opus', '--permission-mode', 'bypassPermissions',
+    ])
+  })
+
+  it('buildArgs：addDirs → 逐个追加 --add-dir（授权读项目外目录）', () => {
+    expect(claudeDef.buildArgs({ model: 'opus', addDirs: ['/ext/a', '/ext/b'] })).toEqual([
+      '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
+      '--include-partial-messages',
+      '--model', 'opus', '--permission-mode', 'bypassPermissions', '--add-dir', '/ext/a', '--add-dir', '/ext/b',
     ])
   })
 

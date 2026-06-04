@@ -17,7 +17,7 @@
  *
  * 上下文窗口百分比：CLI 不直接提供，用占位（基于 usage 估算，标注占位）。
  */
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { UsageDTO } from '../api/types'
 
 // ── 格式化工具 ────────────────────────────────────────────────────────────────
@@ -25,29 +25,48 @@ import type { UsageDTO } from '../api/types'
 function fmtTokens(n: number): string {
   if (n === 0) return '0 tokens'
   if (n < 1000) return `${n} tokens`
-  return `${(n / 1000).toFixed(1)}k tokens`
+  return `${(n / 1000).toFixed(1)}K tokens`
 }
 
 function fmtCost(usd: number): string {
   return `≈ $${usd.toFixed(2)}`
 }
 
-// ── 上下文用量占位计算 ─────────────────────────────────────────────────────────
-// [占位] CLI 不直接提供 context window 使用率，使用 inputTokens 估算（假设 200k 窗口）
-// 真实联动留后续子里程碑
-const CTX_WINDOW = 200_000
+// ── 上下文用量计算 ─────────────────────────────────────────────────────────────
+// 窗口大小用 SDKResultMessage.contextWindow 的权威值（usage.contextWindow）；无则按模型取缓存；再无才回落 200k。
+// SDK ModelInfo 不带窗口字段（已查证），故窗口只能从运行时 result.modelUsage.contextWindow 拿到后按模型缓存（Issue 12）。
+const DEFAULT_CTX_WINDOW = 200_000
 
-function ctxPercent(usage: UsageDTO | undefined): number {
-  if (!usage) return 0
-  return Math.min(100, Math.round((usage.inputTokens / CTX_WINDOW) * 100))
+const CTX_WIN_KEY = 'agent-shell:ctx-window'
+function readWinCache(): Record<string, number> {
+  try { return JSON.parse(localStorage.getItem(CTX_WIN_KEY) ?? '{}') as Record<string, number> } catch { return {} }
+}
+function rememberWin(model: string | undefined, win: number | undefined): void {
+  if (!model || !win) return
+  try {
+    const c = readWinCache()
+    if (c[model] === win) return
+    c[model] = win
+    localStorage.setItem(CTX_WIN_KEY, JSON.stringify(c))
+  } catch { /* noop */ }
+}
+function cachedWin(model: string | undefined): number | undefined {
+  if (!model) return undefined
+  return readWinCache()[model]
 }
 
-function ctxUsedLabel(usage: UsageDTO | undefined): string {
-  if (!usage || usage.inputTokens === 0) return '已用 0 / 200k'
-  const used = usage.inputTokens < 1000
-    ? `${usage.inputTokens}`
-    : `${(usage.inputTokens / 1000).toFixed(1)}k`
-  return `已用 ${used} / 200k`
+const ctxWindow = (usage: UsageDTO | undefined, model?: string): number =>
+  usage?.contextWindow || cachedWin(model) || DEFAULT_CTX_WINDOW
+const fmtK = (n: number): string => (n < 1000 ? `${n}` : `${Math.round(n / 1000)}k`)
+
+function ctxPercent(used: number, win: number): number {
+  return Math.min(100, Math.round((used / win) * 100))
+}
+
+function ctxUsedLabel(used: number, win: number): string {
+  if (used <= 0) return `已用 0 / ${fmtK(win)}`
+  const u = used < 1000 ? `${used}` : `${(used / 1000).toFixed(1)}k`
+  return `已用 ${u} / ${fmtK(win)}`
 }
 
 // ── SVG 计量环 ────────────────────────────────────────────────────────────────
@@ -82,23 +101,52 @@ function RingProgress({ pct }: { pct: number }) {
 
 interface CtxMeterProps {
   usage?: UsageDTO
+  /** 当前模型（上下文窗口按模型缓存的键，Issue 12）。 */
+  model?: string
+  /** 运行中的实时 token 估算（来自 progress 事件）；提供即表示本轮进行中（Issue 10 实时同步）。 */
+  liveTokens?: number
 }
 
-export function CtxMeter({ usage }: CtxMeterProps) {
+export function CtxMeter({ usage, model, liveTokens }: CtxMeterProps) {
   const [open, setOpen] = useState(false)
+  const wrapRef = useRef<HTMLDivElement>(null)
+
+  // 运行时拿到真实上下文窗口 → 按模型缓存，供新会话（尚无 result）直接显示真实窗口而非写死 200k
+  useEffect(() => { rememberWin(model, usage?.contextWindow) }, [model, usage?.contextWindow])
 
   const toggleOpen = (e: React.MouseEvent) => {
     e.stopPropagation()
     setOpen(v => !v)
   }
 
+  // wirePopover 式（对齐 ChatHeader.tsx:88-97）：点弹窗外部 / 按 Escape 关闭
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
   const inputTokens  = usage?.inputTokens  ?? 0
   const outputTokens = usage?.outputTokens ?? 0
   const costUsd      = usage?.costUsd      ?? 0
-  const pct = ctxPercent(usage)
+  const win = ctxWindow(usage, model)
+  // Issue 10：本轮进行中（liveTokens 有值）时用实时估算近似——输出取「已落库 vs 实时估算」较大者，
+  // 上下文「已用」叠加实时输出（output 也占窗口），让弹窗随 progress 实时动而非停在上次 result（新会话即 0）。
+  const live = liveTokens != null
+  const liveOut = live ? Math.max(outputTokens, liveTokens) : outputTokens
+  const usedTokens = inputTokens + (live ? Math.max(0, liveTokens - outputTokens) : 0)
+  const pct = ctxPercent(usedTokens, win)
 
   return (
-    <div className="ctx-wrap">
+    <div className="ctx-wrap" ref={wrapRef}>
       <button
         className={`ctx-meter${open ? ' is-open' : ''}`}
         id="ctxMeter"
@@ -112,14 +160,14 @@ export function CtxMeter({ usage }: CtxMeterProps) {
       <div className="ctx-pop" id="ctxPop" hidden={!open}>
         {/* 本次会话 */}
         <div className="ctx-pop-sec">
-          <div className="ctx-pop-h">本次会话</div>
+          <div className="ctx-pop-h">本次会话{live && <span className="ctx-live">· 实时</span>}</div>
           <div className="ctx-row">
             <span>输入</span>
             <b>{fmtTokens(inputTokens)}</b>
           </div>
           <div className="ctx-row">
-            <span>输出</span>
-            <b>{fmtTokens(outputTokens)}</b>
+            <span>输出{live && liveOut > outputTokens ? ' (估算)' : ''}</span>
+            <b>{fmtTokens(liveOut)}</b>
           </div>
           <div className="ctx-row">
             <span>费用</span>
@@ -127,18 +175,18 @@ export function CtxMeter({ usage }: CtxMeterProps) {
           </div>
         </div>
 
-        {/* 上下文用量（占位：基于 inputTokens / 200k 估算） */}
+        {/* 上下文用量：窗口取真实 contextWindow（按模型缓存），运行中叠加实时输出估算 */}
         <div className="ctx-pop-sec">
           <div className="ctx-pop-h">上下文</div>
           <div className="ctx-bar">
             <span style={{ width: `${pct}%` }} />
           </div>
           <div className="ctx-row">
-            <span>{ctxUsedLabel(usage)}</span>
+            <span>{ctxUsedLabel(usedTokens, win)}</span>
             <b>{pct}%</b>
           </div>
           <div className="ctx-note">
-            剩余约 {Math.round((CTX_WINDOW - inputTokens) / 1000)}k，超出后会自动压缩较早的消息
+            剩余约 {Math.max(0, Math.round((win - usedTokens) / 1000))}k，超出后会自动压缩较早的消息
           </div>
         </div>
       </div>

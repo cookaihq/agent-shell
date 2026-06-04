@@ -15,36 +15,46 @@ import { api } from '../api/client'
 import { useAgentStream } from '../hooks/useAgentStream'
 import { useSplitDrag } from '../hooks/useSplitDrag'
 import { chatReducer, initialChat } from './chatReducer'
-import { RuntimeContext, useRuntimeReducer } from './runtimeState'
+import { RuntimeContext, useRuntimeReducer, saveLastRuntime } from './runtimeState'
 import type { ReactNode } from 'react'
 import { AppShell } from '../shell/AppShell'
 import { ProjBar } from './ProjBar'
 import { ChatHeader } from './ChatHeader'
-import { ChatLog } from './ChatLog'
+import { ChatLog, type OpenCommand } from './ChatLog'
 import { Composer } from './Composer'
+import { PendingCard } from './PendingCard'
 import { FileWorkspace } from './FileWorkspace'
 import type { SessionDTO, UsageDTO } from '../api/types'
 
 interface WorkspaceProps {
   projectId: string
   projectName: string
+  projectPath: string                        // 项目根绝对路径（读取/编辑卡路径精简用，Issue 9）
   sessionId: string
   engine: 'claude' | 'codex'
   model: string
   sessions: SessionDTO[]
+  openSessionIds: string[]                   // 已打开会话 tab 列表（Issue 23）
   initialMessage?: string
+  initialContextFiles?: string[]             // 首页带附件发送：随 initialMessage 一起透传（自动提交时带上）
   chrome: ReactNode                          // 顶部页签条（由 AppNav 统一构建，跨 entry/workspace 共用同一份持久状态）
   onSelectSession: (id: string) => void
+  onCloseSessionTab: (id: string) => void    // 关闭会话 tab（仅关 tab 不删会话，Issue 23）
   onNewSession: () => void
   onBack: () => void
   onNewProject: () => void
   onRename: (name: string) => void           // 改名回传 → AppNav 乐观更新 projects → 页签标题同步
+  onPatchSession: (id: string, patch: { title?: string; pinned?: boolean }) => void  // 会话改名/置顶 → AppNav 乐观回写 sessions → 列表/页签同步
+  onDeleteSession: (id: string) => void      // 真删除会话（连同对话历史，不可恢复）→ AppNav 删库 + 移除 tab/列表 + 处理 active/最后一个边界
 }
 
 export function Workspace(p: WorkspaceProps) {
   const [chat, dispatch] = useReducer(chatReducer, undefined, initialChat)
   const [attached, setAttached] = useState(false)
-  const [runtime, rtDispatch] = useRuntimeReducer(p.engine, p.model)
+  // Issue 29：打开会话时用该会话存的权限/思考强度回填 runtime（Workspace 按 session.id 重挂，初值即生效）；
+  // 无存档（新会话）则由 initialRuntime 回落 localStorage 上次配置（Issue 13）。
+  const sess0 = p.sessions.find((s) => s.id === p.sessionId)
+  const [runtime, rtDispatch] = useRuntimeReducer(p.engine, p.model, { permissionMode: sess0?.permissionMode, effort: sess0?.effort })
   const { containerRef, handleProps, cols } = useSplitDrag()
 
   // Task 18：usage 初值（api.usage 加载）+ liveUsage 实时叠加
@@ -53,6 +63,10 @@ export function Workspace(p: WorkspaceProps) {
   // Task 19/20：文件工作区当前打开文件（FileWorkspace → Composer → CtxFile 联动）
   const [activeFile, setActiveFile] = useState<string | null>(null)
   const handleActiveFile = useCallback((path: string | null) => setActiveFile(path), [])
+
+  // 点击运行命令卡 → 在右侧预览开命令 tab。seq 保证同一命令重复点也触发（FileWorkspace 据 seq 变化响应）。
+  const [openCmd, setOpenCmd] = useState<{ cmd: OpenCommand; seq: number } | null>(null)
+  const onOpenCommand = useCallback((cmd: OpenCommand) => setOpenCmd((prev) => ({ cmd, seq: (prev?.seq ?? 0) + 1 })), [])
 
   // 刷新恢复：进会话时 GET messages + status + usage，loadHistory，然后 attached=true 开 SSE
   useEffect(() => {
@@ -81,18 +95,39 @@ export function Workspace(p: WorkspaceProps) {
     inputTokens:  baseUsage.inputTokens  + (chat.liveUsage?.inputTokens  ?? 0),
     outputTokens: baseUsage.outputTokens + (chat.liveUsage?.outputTokens ?? 0),
     costUsd:      baseUsage.costUsd      + (chat.liveUsage?.costUsd      ?? 0),
+    // 上下文窗口非累计——取最近一轮的权威值（SDKResultMessage.contextWindow）
+    contextWindow: chat.liveUsage?.contextWindow,
   }
 
-  const submit = (text: string) => {
-    dispatch({ type: 'optimisticUser', text })
-    void api.submit(p.sessionId, text)
+  // claude 运行时档位（权限/思考强度/模型）随消息传给 daemon → 真生效；codex 不在本次范围
+  const claudeRuntime = () => (p.engine === 'claude' ? { permissionMode: runtime.claudeMode, effort: runtime.effort.claude, model: runtime.model } : undefined)
+
+  const submit = (text: string, contextFiles: string[] = []) => {
+    // 乐观渲染：带上附件 → 立刻显示 📎 N 个附件（name 取 basename 作预览，权威以落库为准）
+    const attachments = contextFiles.map((path) => ({ name: path.split(/[\\/]/).filter(Boolean).pop() ?? path, path }))
+    dispatch({ type: 'optimisticUser', text, attachments })
+    void api.submit(p.sessionId, text, contextFiles, claudeRuntime())
+  }
+
+  // 运行中热切换：claude 会话运行时改权限档/思考强度/模型 → 立即 POST /runtime（setPermissionMode / applyFlagSettings / setModel）
+  useEffect(() => {
+    if (p.engine !== 'claude' || !running) return
+    void api.setRuntime(p.sessionId, { permissionMode: runtime.claudeMode, effort: runtime.effort.claude, model: runtime.model })
+  }, [runtime.claudeMode, runtime.effort.claude, runtime.model])
+
+  // Issue 13：运行时档位每次变化都缓存到 localStorage，供下个新会话/新项目复用（与 DB 会话级存档互补）
+  useEffect(() => { saveLastRuntime(runtime) }, [runtime])
+
+  // 授权/提问回执 → daemon resolve 挂起的 canUseTool；daemon 随后发 permission_resolved 移除卡片
+  const onDecision = (body: { requestId: string; behavior: 'allow' | 'deny'; message?: string; updatedInput?: Record<string, unknown> }) => {
+    void api.decision(p.sessionId, body)
   }
 
   const initialSentRef = useRef(false)
   useEffect(() => {
     if (attached && p.initialMessage && !initialSentRef.current) {
       initialSentRef.current = true
-      submit(p.initialMessage)
+      submit(p.initialMessage, p.initialContextFiles)
     }
   }, [attached, p.initialMessage])
 
@@ -113,6 +148,7 @@ export function Workspace(p: WorkspaceProps) {
           projectId={p.projectId}
           projectName={p.projectName}
           engine={p.engine}
+          sessionId={p.sessionId}
           onBack={p.onBack}
           onRename={p.onRename}
         />
@@ -125,23 +161,33 @@ export function Workspace(p: WorkspaceProps) {
           <div className="chat">
             <ChatHeader
               sessions={p.sessions}
+              openSessionIds={p.openSessionIds}
               activeId={p.sessionId}
               activeRunning={running}
-              messageCount={chat.messages.length}
               onSelect={p.onSelectSession}
+              onCloseTab={p.onCloseSessionTab}
               onNew={p.onNewSession}
               onResume={(id) => void api.resume(id, '继续')}
-              onPin={(id, v) => void api.patchSession(id, { pinned: v })}
-              onRename={(id, t) => void api.patchSession(id, { title: t })}
+              onPin={(id, v) => p.onPatchSession(id, { pinned: v })}
+              onRename={(id, t) => p.onPatchSession(id, { title: t })}
+              onDelete={(id) => p.onDeleteSession(id)}
+              projectId={p.projectId}
             />
             <ChatLog
               messages={chat.messages}
               liveBlocks={chat.liveBlocks}
               runStatus={chat.runStatus}
               failReason={chat.failReason}
+              liveProgress={chat.liveProgress}
               onResume={resume}
+              onOpenCommand={onOpenCommand}
               engine={p.engine}
+              projectRoot={p.projectPath}
+              projectId={p.projectId}
+              sessionId={p.sessionId}
             />
+            {/* SDK 交互回路：聊天内授权卡 / AskUserQuestion 选择卡（挂起时显示，回执后由 daemon 移除） */}
+            <PendingCard reqs={chat.pendingRequests} onDecision={onDecision} />
             {/* Task 15/17/18/20: Composer（发送/停止 + @// 菜单 + 附件 + CtxMeter + CtxFile） */}
             <Composer
               running={running}
@@ -150,7 +196,9 @@ export function Workspace(p: WorkspaceProps) {
               engine={p.engine}
               model={p.model}
               projectId={p.projectId}
+              sessionId={p.sessionId}
               usage={usage}
+              liveTokens={running ? chat.liveProgress?.tokens : undefined}
               activeFile={activeFile}
             />
           </div>
@@ -162,6 +210,7 @@ export function Workspace(p: WorkspaceProps) {
           <FileWorkspace
             projectId={p.projectId}
             onActiveFile={handleActiveFile}
+            openCmd={openCmd}
           />
         </div>
       </AppShell>

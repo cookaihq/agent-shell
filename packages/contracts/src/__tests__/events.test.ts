@@ -56,4 +56,37 @@ describe('AgentEvent', () => {
       AgentEvent.parse({ type: 'progress', tokens: 0, activity: { kind: 'thinking' } }),
     ).not.toThrow()
   })
+
+  // ── SDK 交互回路：逐工具授权 + AskUserQuestion + 解决/撤销 ──────────────────
+  it('接受 permission_request 事件（带 requestId/toolName/input + 可选展示字段）', () => {
+    const e = AgentEvent.parse({
+      type: 'permission_request', requestId: 'r1', toolName: 'Write',
+      input: { file_path: 'a.ts' }, title: 'Claude wants to write a.ts', displayName: 'Write file',
+    })
+    expect(e).toMatchObject({ type: 'permission_request', requestId: 'r1', toolName: 'Write' })
+  })
+
+  it('permission_request 缺 requestId → 拒绝', () => {
+    expect(() => AgentEvent.parse({ type: 'permission_request', toolName: 'Write', input: {} })).toThrow()
+  })
+
+  it('接受 ask_user_question 事件（questions[].options[]）', () => {
+    const e = AgentEvent.parse({
+      type: 'ask_user_question', requestId: 'q1',
+      questions: [{ question: '选哪个？', header: '方案', multiSelect: false, options: [{ label: 'A', description: '甲' }, { label: 'B' }] }],
+    })
+    expect(e).toMatchObject({ type: 'ask_user_question', requestId: 'q1' })
+  })
+
+  it('接受 permission_resolved 事件（清 UI：allow/deny/cancelled）', () => {
+    for (const outcome of ['allow', 'deny', 'cancelled']) {
+      expect(() => AgentEvent.parse({ type: 'permission_resolved', requestId: 'r1', outcome })).not.toThrow()
+    }
+    expect(() => AgentEvent.parse({ type: 'permission_resolved', requestId: 'r1', outcome: 'nope' })).toThrow()
+  })
+
+  it('turn_end 可带 sdkMessageId/sdkUuid', () => {
+    const ev = { type: 'turn_end', stopReason: 'end_turn', sdkMessageId: 'msg_1', sdkUuid: 'u1' }
+    expect(AgentEvent.parse(ev)).toMatchObject({ sdkMessageId: 'msg_1', sdkUuid: 'u1' })
+  })
 })

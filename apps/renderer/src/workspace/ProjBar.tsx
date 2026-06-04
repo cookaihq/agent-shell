@@ -17,12 +17,15 @@ interface ProjBarProps {
   projectId: string
   projectName: string
   engine: 'claude' | 'codex'
+  sessionId?: string                  // 传给 RuntimeSwitcher 拉动态模型列表（Issue 12）
   onBack: () => void
   onRename?: (name: string) => void   // 改名成功后回传新名 → 上层（AppNav）同步 projects/页签标题
 }
 
-export function ProjBar({ projectId, projectName, engine, onBack, onRename }: ProjBarProps) {
-  const [displayName, setDisplayName] = useState(projectName)
+export function ProjBar({ projectId, projectName, engine, sessionId, onBack, onRename }: ProjBarProps) {
+  // 不再持有本地 displayName 副本：标题直接渲染 projectName（其值由上层 AppNav 按 id 现查 projects，
+  // 与顶部页签同源）。曾经的本地副本一旦编辑就永不回退，会在 projects 被旧 reload 覆盖时造成
+  // 「标题新名、页签旧名」的 split-brain；去掉它，标题与页签即恒等。编辑期间只用临时 draft。
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState('')
   const doneRef = useRef(false)
@@ -30,24 +33,21 @@ export function ProjBar({ projectId, projectName, engine, onBack, onRename }: Pr
   const startEdit = () => {
     if (editing) return
     setEditing(true)
-    setDraft(displayName)
+    setDraft(projectName)
     doneRef.current = false
   }
 
-  // commit(keep): keep=true → 保存新名，keep=false → 恢复原名
+  // commit(keep): keep=true → 保存新名，keep=false → 取消
   const commit = (keep: boolean, currentDraft: string) => {
     if (doneRef.current) return
     doneRef.current = true
     const trimmed = currentDraft.trim()
-    if (keep && trimmed) {
-      setDisplayName(trimmed)
-      setEditing(false)
-      onRename?.(trimmed)   // 回传上层乐观更新 projects → 顶部页签标题同步
+    setEditing(false)
+    if (keep && trimmed && trimmed !== projectName) {
+      onRename?.(trimmed)   // 回传上层乐观更新 projects → 项目标题 + 顶部页签同源刷新
       api.renameProject(projectId, trimmed).catch(() => {
         // 静默失败（前端 UI 层不处理后端错误）
       })
-    } else {
-      setEditing(false)
     }
   }
 
@@ -82,7 +82,7 @@ export function ProjBar({ projectId, projectName, engine, onBack, onRename }: Pr
             title="点击重命名项目"
             onClick={startEdit}
           >
-            {displayName}
+            {projectName}
           </span>
         )}
       </div>
@@ -90,7 +90,7 @@ export function ProjBar({ projectId, projectName, engine, onBack, onRename }: Pr
       <div className="spacer" />
 
       {/* Runtime 切换器（消费 RuntimeContext，必须在 Provider 内使用） */}
-      <RuntimeSwitcher />
+      <RuntimeSwitcher sessionId={sessionId} />
     </div>
   )
 }

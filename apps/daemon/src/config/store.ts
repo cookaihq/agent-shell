@@ -15,6 +15,7 @@ export function makeConfigStore(file: string, defaults: AppConfig): ConfigStore 
       return {
         projectsDir: typeof raw.projectsDir === 'string' ? raw.projectsDir : defaults.projectsDir,
         skillsDir: typeof raw.skillsDir === 'string' ? raw.skillsDir : defaults.skillsDir,
+        debugMode: typeof raw.debugMode === 'boolean' ? raw.debugMode : defaults.debugMode,
       }
     } catch { return { ...defaults } }
   }

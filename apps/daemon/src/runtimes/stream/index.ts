@@ -2,7 +2,7 @@ import type { AgentEvent, Engine } from '@agent-shell/contracts'
 import { parseClaudeLine } from './claude'
 import { parseCodexLine } from './codex'
 
-export { parseClaudeLine } from './claude'
+export { parseClaudeLine, createClaudeParser } from './claude'
 export { parseCodexLine } from './codex'
 
 /** 把整段原始事件流（多行 JSONL）按引擎归一为内部事件序列；坏帧/空行跳过。 */

@@ -1,8 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { api } from '../api/client'
 import { Button } from '../ui/Button'
+import { useSettings } from './SettingsContext'
 
 export function SystemSettings() {
+  const { debugMode, setDebugMode } = useSettings()
   const [projectsDir, setProjectsDir] = useState('')
   const [skillsDir, setSkillsDir] = useState('')
   const [saved, setSaved] = useState(false)
@@ -76,6 +78,13 @@ export function SystemSettings() {
             >更改…</button>
           </div>
           <div className="field-hint">「添加技能」导入的 SKILL.md 技能存放于此。</div>
+        </div>
+        <div className="field" style={{ marginTop: '2px' }}>
+          <label className="field-label" style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+            <input type="checkbox" checked={debugMode} onChange={(e) => setDebugMode(e.target.checked)} />
+            调试模式
+          </label>
+          <div className="field-hint">开启后在会话顶部与每条回复旁显示 🐞 调试信息（项目/会话 ID、SDK 版本、消息 ID）。</div>
         </div>
       </div>
       <div className="set-actions" style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 14 }}>

@@ -16,7 +16,7 @@ import { ModelPill } from '../ModelPill'
 import { RuntimeContext, initialRuntime, runtimeReducer } from '../runtimeState'
 
 function Wrapper({ engine, children }: { engine: 'claude' | 'codex'; children?: ReactNode }) {
-  const model = engine === 'claude' ? 'Claude Opus 4.8' : 'GPT 5.5'
+  const model = engine === 'claude' ? 'opus' : 'GPT 5.5'
   const [runtime, dispatch] = useReducer(runtimeReducer, undefined, () => initialRuntime(engine, model))
   return (
     <RuntimeContext.Provider value={{ runtime, dispatch }}>
@@ -25,18 +25,35 @@ function Wrapper({ engine, children }: { engine: 'claude' | 'codex'; children?: 
   )
 }
 
-test('claude 脸显示模型名', () => {
+test('claude 脸显示模型名（value→displayName）', () => {
   render(<Wrapper engine="claude" />)
-  expect(screen.getByText('Claude Opus 4.8')).toBeInTheDocument()
+  expect(screen.getByText('Opus')).toBeInTheDocument()   // 'opus' → 'Opus'
 })
 
-test('claude 脸：弹窗有权限段 / 思考强度 / 模型段', async () => {
+test('claude 弹窗有权限段（5 档）+ 思考强度 + 模型段', async () => {
   render(<Wrapper engine="claude" />)
-  await userEvent.click(screen.getByRole('button', { name: /Claude Opus/ }))
+  await userEvent.click(screen.getByRole('button', { name: /opus/i }))
+  // 权限选择器加回（接 SDK 真链路）：权限段 + 5 档之一
   expect(screen.getByText('权限')).toBeInTheDocument()
+  expect(screen.getByText('绕过权限')).toBeInTheDocument()
   expect(screen.getByText('思考强度')).toBeInTheDocument()
-  // 模型段：应有模型列表里的某个模型
-  expect(screen.getByText('Claude Opus 4.7')).toBeInTheDocument()
+  expect(screen.getByText('Haiku')).toBeInTheDocument()   // 静态兜底列表含 Haiku 项
+})
+
+test('claude 点权限档 → dispatch SET_CLAUDE_MODE（脸胶囊更新）', async () => {
+  function ObservableWrapper() {
+    const [runtime, dispatch] = useReducer(runtimeReducer, undefined, () => initialRuntime('claude', 'opus'))
+    return (
+      <RuntimeContext.Provider value={{ runtime, dispatch }}>
+        <ModelPill />
+        <span data-testid="cmode">{runtime.claudeMode}</span>
+      </RuntimeContext.Provider>
+    )
+  }
+  render(<ObservableWrapper />)
+  await userEvent.click(screen.getByRole('button', { name: /opus/i }))
+  await userEvent.click(screen.getByText('计划模式'))
+  expect(screen.getByTestId('cmode').textContent).toBe('plan')
 })
 
 test('codex 弹窗有审批策略 + 沙箱级别', async () => {
@@ -46,28 +63,6 @@ test('codex 弹窗有审批策略 + 沙箱级别', async () => {
   expect(screen.getByText('沙箱级别')).toBeInTheDocument()
 })
 
-test('claude 弹窗点选权限项 → 前端状态更新（不传后端）', async () => {
-  // 用一个能观察 runtime 变化的 wrapper
-  function ObservableWrapper() {
-    const [runtime, dispatch] = useReducer(runtimeReducer, undefined, () => initialRuntime('claude', 'Claude Opus 4.8'))
-    return (
-      <RuntimeContext.Provider value={{ runtime, dispatch }}>
-        <ModelPill />
-        {/* 显示当前 claudeMode 供断言 */}
-        <span data-testid="mode">{runtime.claudeMode}</span>
-      </RuntimeContext.Provider>
-    )
-  }
-  render(<ObservableWrapper />)
-  // 初始是 default
-  expect(screen.getByTestId('mode').textContent).toBe('default')
-  // 打开弹窗
-  await userEvent.click(screen.getByRole('button', { name: /Claude Opus/ }))
-  // 点「自动编辑」选项
-  await userEvent.click(screen.getByText('自动编辑'))
-  expect(screen.getByTestId('mode').textContent).toBe('acceptEdits')
-})
-
 test('点 model-btn 外部关闭弹窗', async () => {
   render(
     <div>
@@ -75,16 +70,16 @@ test('点 model-btn 外部关闭弹窗', async () => {
       <div data-testid="outside">outside</div>
     </div>
   )
-  await userEvent.click(screen.getByRole('button', { name: /Claude Opus/ }))
-  expect(screen.getByText('权限')).toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: /opus/i }))
+  expect(screen.getByText('思考强度')).toBeInTheDocument()
   // 点外部
   await userEvent.click(screen.getByTestId('outside'))
-  expect(screen.queryByText('权限')).not.toBeInTheDocument()
+  expect(screen.queryByText('思考强度')).not.toBeInTheDocument()
 })
 
 test('Effort 点滑条切换', async () => {
   function ObservableWrapper() {
-    const [runtime, dispatch] = useReducer(runtimeReducer, undefined, () => initialRuntime('claude', 'Claude Opus 4.8'))
+    const [runtime, dispatch] = useReducer(runtimeReducer, undefined, () => initialRuntime('claude', 'opus'))
     return (
       <RuntimeContext.Provider value={{ runtime, dispatch }}>
         <ModelPill />
@@ -93,7 +88,7 @@ test('Effort 点滑条切换', async () => {
     )
   }
   render(<ObservableWrapper />)
-  await userEvent.click(screen.getByRole('button', { name: /Claude Opus/ }))
+  await userEvent.click(screen.getByRole('button', { name: /opus/i }))
   // 点「低」effort dot
   const dots = document.querySelectorAll('.effort-dot')
   await userEvent.click(dots[0] as HTMLElement)  // 第一个 = 'low'

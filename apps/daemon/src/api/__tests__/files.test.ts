@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest'
 import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path'
-import { scanTree, readProjectFile, importFiles, FileAccessError } from '../files'
+import { scanTree, readProjectFile, resolveProjectFile, importFiles, saveAttachmentBytes, FileAccessError } from '../files'
 
 let tmp = ''
 afterEach(() => { if (tmp) fs.rmSync(tmp, { recursive: true, force: true }); tmp = '' })
@@ -25,6 +25,32 @@ describe('scanTree', () => {
     for (let i = 0; i < 10; i++) fs.writeFileSync(path.join(tmp, `f${i}`), 'x')
     expect(scanTree(tmp, { maxNodes: 3 }).length).toBeLessThanOrEqual(3)
   })
+  it('软链接目录：跟随解析为 dir、标 symlink、递归出子节点（技能注入场景）', () => {
+    const root = fixture()
+    // 在项目外建一个“技能库”目录，内含 SKILL.md，软链进项目（模拟 injectClaudeSkills）
+    const lib = fs.mkdtempSync(path.join(os.tmpdir(), 'as-skill-'))
+    fs.writeFileSync(path.join(lib, 'SKILL.md'), '# skill')
+    fs.symlinkSync(lib, path.join(root, 'my-skill'), 'dir')
+    const t = scanTree(root)
+    const node = t.find((n) => n.name === 'my-skill')!
+    expect(node).toMatchObject({ type: 'dir', path: 'my-skill', symlink: true })
+    expect(node.children!.map((c) => c.name)).toContain('SKILL.md')
+    fs.rmSync(lib, { recursive: true, force: true })
+  })
+  it('软链接文件：跟随解析为 file、标 symlink', () => {
+    const root = fixture()
+    const lib = fs.mkdtempSync(path.join(os.tmpdir(), 'as-link-'))
+    const target = path.join(lib, 'real.txt'); fs.writeFileSync(target, 'x')
+    fs.symlinkSync(target, path.join(root, 'alias.txt'), 'file')
+    const node = scanTree(root).find((n) => n.name === 'alias.txt')!
+    expect(node).toMatchObject({ type: 'file', path: 'alias.txt', symlink: true })
+    fs.rmSync(lib, { recursive: true, force: true })
+  })
+  it('悬空软链接（目标已删）：跳过、不报错', () => {
+    const root = fixture()
+    fs.symlinkSync(path.join(root, '__missing__'), path.join(root, 'dangling'), 'file')
+    expect(scanTree(root).find((n) => n.name === 'dangling')).toBeUndefined()
+  })
 })
 describe('readProjectFile', () => {
   it('读内容', () => { expect(readProjectFile(fixture(), 'README.md')).toEqual({ content: '# hi', truncated: false }) })
@@ -35,6 +61,19 @@ describe('readProjectFile', () => {
     try { readProjectFile(r, '../x') } catch (e) { expect((e as FileAccessError).reason).toBe('out_of_bounds') }
     try { readProjectFile(r, 'nope') } catch (e) { expect((e as FileAccessError).reason).toBe('not_found') }
     try { readProjectFile(r, 'src') } catch (e) { expect((e as FileAccessError).reason).toBe('not_a_file') }
+  })
+})
+
+describe('resolveProjectFile', () => {
+  it('返回项目内文件的绝对路径', () => {
+    const r = fixture()
+    expect(resolveProjectFile(r, 'README.md')).toBe(path.join(path.resolve(r), 'README.md'))
+  })
+  it('越界/不存在/目录 抛错', () => {
+    const r = fixture()
+    try { resolveProjectFile(r, '../x') } catch (e) { expect((e as FileAccessError).reason).toBe('out_of_bounds') }
+    try { resolveProjectFile(r, 'nope') } catch (e) { expect((e as FileAccessError).reason).toBe('not_found') }
+    try { resolveProjectFile(r, 'src') } catch (e) { expect((e as FileAccessError).reason).toBe('not_a_file') }
   })
 })
 
@@ -76,5 +115,45 @@ describe('importFiles', () => {
     const ghost = path.join(srcDir, 'nope.txt')            // 不存在
     expect(importFiles(root, [inside, ghost])).toEqual([])
     fs.rmSync(srcDir, { recursive: true, force: true })
+  })
+  it('dir 参：复制进子目录 <root>/<dir>/，自动建夹', () => {
+    const { root, srcDir } = withSource()
+    const f = path.join(srcDir, 'note.txt'); fs.writeFileSync(f, 'hello')
+    const out = importFiles(root, [f], 'attachments')
+    expect(out).toEqual([{ name: 'note.txt', from: path.resolve(f) }])
+    expect(fs.existsSync(path.join(root, 'attachments'))).toBe(true)        // 自动建夹
+    expect(fs.readFileSync(path.join(root, 'attachments', 'note.txt'), 'utf8')).toBe('hello')
+    expect(fs.existsSync(path.join(root, 'note.txt'))).toBe(false)          // 不落项目根
+    fs.rmSync(srcDir, { recursive: true, force: true })
+  })
+  it('dir 参：同名在子目录内去重，不与项目根冲突', () => {
+    const { root, srcDir } = withSource()
+    fs.mkdirSync(path.join(root, 'attachments'))
+    fs.writeFileSync(path.join(root, 'attachments', 'a.txt'), 'OLD')
+    const f = path.join(srcDir, 'a.txt'); fs.writeFileSync(f, 'NEW')
+    const out = importFiles(root, [f], 'attachments')
+    expect(out[0].name).toBe('a (1).txt')
+    expect(fs.readFileSync(path.join(root, 'attachments', 'a.txt'), 'utf8')).toBe('OLD')
+    expect(fs.readFileSync(path.join(root, 'attachments', 'a (1).txt'), 'utf8')).toBe('NEW')
+    fs.rmSync(srcDir, { recursive: true, force: true })
+  })
+})
+
+describe('saveAttachmentBytes（粘贴字节写盘）', () => {
+  it('写进 <root>/<dir>/，自动建夹，返回相对 posix 路径 + 大小', () => {
+    const root = fixture()
+    const data = Buffer.from('PNGDATA')
+    const out = saveAttachmentBytes(root, 'attachments', 'pasted-1.png', data)
+    expect(out).toEqual({ name: 'pasted-1.png', path: 'attachments/pasted-1.png', size: 7 })
+    expect(fs.readFileSync(path.join(root, 'attachments', 'pasted-1.png'))).toEqual(data)
+  })
+  it('同名去重', () => {
+    const root = fixture()
+    fs.mkdirSync(path.join(root, 'attachments'))
+    fs.writeFileSync(path.join(root, 'attachments', 'x.png'), 'OLD')
+    const out = saveAttachmentBytes(root, 'attachments', 'x.png', Buffer.from('NEW'))
+    expect(out.name).toBe('x (1).png')
+    expect(out.path).toBe('attachments/x (1).png')
+    expect(fs.readFileSync(path.join(root, 'attachments', 'x.png'), 'utf8')).toBe('OLD')
   })
 })

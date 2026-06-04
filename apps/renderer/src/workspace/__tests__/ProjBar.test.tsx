@@ -11,6 +11,7 @@ import { SettingsProvider } from '../../settings/SettingsContext'
 vi.mock('../../api/client', () => ({
   api: {
     renameProject: vi.fn().mockResolvedValue(undefined),
+    getConfig: vi.fn().mockResolvedValue({ projectsDir: '/p', skillsDir: '/s' }),
   },
 }))
 
@@ -21,6 +22,7 @@ function renderProjBar(
     engine?: 'claude' | 'codex'
     model?: string
     onBack?: () => void
+    onRename?: (name: string) => void
   } = {}
 ) {
   const {
@@ -29,19 +31,22 @@ function renderProjBar(
     engine = 'claude',
     model = 'Claude Opus 4.8',
     onBack = vi.fn(),
+    onRename,
   } = opts
 
   const runtime = initialRuntime(engine, model)
   const dispatch = vi.fn()
   const ctx: RuntimeContextValue = { runtime, dispatch }
 
-  return render(
+  const tree = (name: string) => (
     <SettingsProvider>
       <RuntimeContext.Provider value={ctx}>
-        <ProjBar projectId={projectId} projectName={projectName} engine={engine} onBack={onBack} />
+        <ProjBar projectId={projectId} projectName={name} engine={engine} onBack={onBack} onRename={onRename} />
       </RuntimeContext.Provider>
     </SettingsProvider>
   )
+  const r = render(tree(projectName))
+  return { ...r, rerenderWithName: (name: string) => r.rerender(tree(name)) }
 }
 
 describe('ProjBar 结构', () => {
@@ -105,16 +110,21 @@ describe('ProjBar 项目名就地重命名', () => {
     expect(container.querySelector('input.proj-rename')).toBeTruthy()
   })
 
-  it('Enter 确认 → 调 api.renameProject + 显示新名', async () => {
-    const { container } = renderProjBar({ projectId: 'proj-1' })
+  it('Enter 确认 → 调 onRename + api.renameProject；显示名跟随 projectName prop（受控）', async () => {
+    // ProjBar 受控：自身不缓存显示名，改名只回传 onRename + 落库；显示新名由父级更新 projectName prop 驱动。
+    const onRename = vi.fn()
+    const { container, rerenderWithName } = renderProjBar({ projectId: 'proj-1', onRename })
     const projName = container.querySelector('.proj-name')!
     fireEvent.click(projName)
     const input = container.querySelector('input.proj-rename')! as HTMLInputElement
     fireEvent.change(input, { target: { value: '新项目名称' } })
     fireEvent.keyDown(input, { key: 'Enter' })
     await waitFor(() => {
+      expect(onRename).toHaveBeenCalledWith('新项目名称')
       expect(api.renameProject).toHaveBeenCalledWith('proj-1', '新项目名称')
     })
+    // 父级据 onRename 更新 projectName → ProjBar 显示新名（与顶部页签同源）
+    rerenderWithName('新项目名称')
     expect(container.querySelector('.proj-name')?.textContent).toBe('新项目名称')
   })
 

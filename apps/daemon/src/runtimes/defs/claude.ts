@@ -1,4 +1,4 @@
-import { parseClaudeLine } from '../stream'
+import { createClaudeParser, parseClaudeLine } from '../stream'
 import type { BuildArgsOpts, RuntimeAgentDef } from '../types'
 
 /** claude 引擎声明（参数/格式/认证均来自 M3 起草前真机实测，见计划「已查证的真实行为」）。 */
@@ -15,7 +15,10 @@ export const claudeDef: RuntimeAgentDef = {
       '--include-partial-messages',
       '--model', opts.model,
     ]
-    if (opts.permissionMode) args.push('--permission-mode', opts.permissionMode)
+    // headless（-p）下没有授权交互通道，default 模式会把写操作/mkdir 一律自动拒。
+    // 对齐 open-design：无条件写死 bypassPermissions，绕过所有权限检查让写操作放行。
+    args.push('--permission-mode', 'bypassPermissions')
+    for (const d of opts.addDirs ?? []) args.push('--add-dir', d)   // 授权读项目外目录
     if (opts.resumableId) args.push('--resume', opts.resumableId)
     return args
   },
@@ -23,6 +26,8 @@ export const claudeDef: RuntimeAgentDef = {
     return JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text }] } }) + '\n'
   },
   parseLine: parseClaudeLine,
+  // 流式 progress 需跨行累计 → 提供 per-run 有状态解析器；调度器每 turn 起一个实例，状态隔离。
+  createParser: createClaudeParser,
   extractResumableId(line: string): string | undefined {
     try { const o = JSON.parse(line); return typeof o?.session_id === 'string' ? o.session_id : undefined }
     catch { return undefined }
