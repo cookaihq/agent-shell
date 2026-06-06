@@ -74,7 +74,7 @@ describe('ProjBar 结构', () => {
   })
 
   it('engdot 反映真实引擎色（codex → var(--codex)，不写死 claude）', () => {
-    const { container } = renderProjBar({ engine: 'codex', model: 'GPT 5.5' })
+    const { container } = renderProjBar({ engine: 'codex', model: 'gpt-5.5' })
     const dot = container.querySelector('.engdot') as HTMLElement
     expect(dot.style.background).toBe('var(--codex)')
     expect(dot.style.background).not.toBe('var(--claude)')

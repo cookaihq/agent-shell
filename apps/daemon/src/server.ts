@@ -1,4 +1,6 @@
 import http from 'node:http'
+import path from 'node:path'
+import { EventEmitter } from 'node:events'
 import type { AddressInfo } from 'node:net'
 import { timingSafeEqual } from 'node:crypto'
 import express from 'express'
@@ -9,8 +11,11 @@ import { detectEngines } from './runtimes/detection'
 import { openDatabase } from './db/database'
 import { SessionRuntime } from './session/sessionRuntime'
 import { createApiRouter } from './api/routes'
-import { defaultProjectsDir, defaultSkillsDir, configPath } from './paths'
+import { defaultProjectsDir, defaultSkillsDir, configPath, channelDataDir } from './paths'
 import { makeConfigStore } from './config/store'
+import { makeProviderStore, type ProviderStore } from './providers/store'
+import { AutomationScheduler } from './automation/scheduler'
+import { makeAutomationRunHandler, type AutomationRunDone } from './automation/runHandler'
 
 declare module 'express-serve-static-core' {
   interface Request {
@@ -40,6 +45,15 @@ export interface StartDaemonOptions {
   authSecret?: string
   /** 测试注入：transcript 文件目录；缺省用 sessionsDir()。 */
   transcriptDir?: string
+  /** 测试注入：技能源清单文件 / git 缓存目录；缺省用 paths.ts 真实路径（隔离测试用，避免污染 ~/.agent-shell）。 */
+  skillSourcesPath?: string
+  skillSrcCacheDir?: string
+  /** 注入 ProviderStore（测试用，隔离到临时文件）；缺省用 channelDataDir 下的 providers.json。 */
+  providers?: ProviderStore
+  /** 注入调度器（测试用）；缺省自建并 armAll。 */
+  scheduler?: AutomationScheduler
+  /** 自动化 run 结束回调（桌面壳订阅 → 系统通知，§7）。 */
+  onAutomationRunDone?: (done: AutomationRunDone) => void
 }
 
 export async function startDaemon(opts: StartDaemonOptions = {}): Promise<DaemonServer> {
@@ -94,6 +108,7 @@ export async function startDaemon(opts: StartDaemonOptions = {}): Promise<Daemon
 
   const db = opts.db ?? openDatabase()
   const ownDb = opts.db === undefined   // 自己建的才负责在 close 时关闭
+  const providers = opts.providers ?? makeProviderStore(path.join(channelDataDir(), 'providers.json'))
   const store = makeConfigStore(configPath(), { projectsDir: defaultProjectsDir(), skillsDir: defaultSkillsDir(), debugMode: false })
   // opts 覆盖（测试注入）：提供则该字段恒用 opts 值，不落 config 文件
   const readConfig = () => {
@@ -102,6 +117,7 @@ export async function startDaemon(opts: StartDaemonOptions = {}): Promise<Daemon
       projectsDir: opts.projectsDir ?? c.projectsDir,
       skillsDir: opts.skillsDir ?? c.skillsDir,
       debugMode: c.debugMode,
+      engineModels: c.engineModels,
     }
   }
   const writeConfig = (p: Parameters<typeof store.write>[0]) => { store.write(p); return readConfig() }
@@ -110,8 +126,24 @@ export async function startDaemon(opts: StartDaemonOptions = {}): Promise<Daemon
     if (!found) throw new Error(`未检测到 ${engine} CLI`)
     return found
   }
-  const runtime = opts.runtime ?? new SessionRuntime({ db, resolveBin })
-  app.use('/', createApiRouter({ db, runtime, readConfig, writeConfig, detect, transcriptDir: opts.transcriptDir }))
+  const runtime = opts.runtime ?? new SessionRuntime({ db, resolveBin, resolveCreds: (engine) => providers.resolveActiveCreds(engine) })
+  // 自动化 run 结束事件 hub：run handler 触发 → 同进程广播给 SSE 订阅者（桌面壳 /automations/events 拉取 → 系统通知）
+  const runDoneEmitter = new EventEmitter()
+  runDoneEmitter.setMaxListeners(0)
+  // 定时自动化调度器：注入则用注入的（测试），否则自建 + 装 run handler + 排所有启用项的定时器
+  const scheduler = opts.scheduler ?? new AutomationScheduler({ db })
+  if (!opts.scheduler) {
+    scheduler.setRunHandler(makeAutomationRunHandler({
+      db, runtime, resolveProjectsDir: () => readConfig().projectsDir,
+      onRunDone: (d) => { runDoneEmitter.emit('done', d); opts.onAutomationRunDone?.(d) },
+    }))
+    scheduler.armAll()
+  }
+  const onRunDone = (fn: (d: AutomationRunDone) => void): (() => void) => {
+    runDoneEmitter.on('done', fn)
+    return () => { runDoneEmitter.off('done', fn) }
+  }
+  app.use('/', createApiRouter({ db, runtime, readConfig, writeConfig, detect, transcriptDir: opts.transcriptDir, skillSourcesPath: opts.skillSourcesPath, skillSrcCacheDir: opts.skillSrcCacheDir, providers, scheduler, onRunDone }))
 
   app.get('/health', (_req, res) => {
     res.json({ status: 'ok' })
@@ -173,6 +205,7 @@ export async function startDaemon(opts: StartDaemonOptions = {}): Promise<Daemon
     port: addr.port,
     close: () =>
       new Promise<void>((resolve) => {
+        scheduler.stop()   // 停所有自动化定时器
         server.close(() => { if (ownDb) db.close(); resolve() })
         server.closeIdleConnections()
         // 活跃的 SSE 长连接（持有未结束的 res）不是 idle，closeIdleConnections 关不掉——

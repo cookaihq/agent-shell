@@ -1,7 +1,7 @@
 // SkillModal.tsx — 注入技能模态（真实技能库，与技能子页同源），对照 app.js L774-813
 import { useEffect, useState } from 'react'
 import { api } from '../api/client'
-import type { Skill } from '../api/types'
+import type { LibrarySkill } from '../api/types'
 import { IconClose } from '../ui/icons'
 import { Button } from '../ui/Button'
 import { IconButton } from '../ui/IconButton'
@@ -15,10 +15,10 @@ interface SkillModalProps {
 export function SkillModal({ initialSelected, onClose, onDone }: SkillModalProps) {
   const [q, setQ] = useState('')
   const [sel, setSel] = useState<Set<string>>(() => new Set(initialSelected))
-  const [skills, setSkills] = useState<Skill[]>([])
+  const [skills, setSkills] = useState<LibrarySkill[]>([])
 
   useEffect(() => {
-    api.listSkills().then(r => setSkills(r.skills)).catch(() => setSkills([]))
+    api.listSkillLibrary().then(r => setSkills(r.skills)).catch(() => setSkills([]))
   }, [])
 
   useEffect(() => {
@@ -32,9 +32,9 @@ export function SkillModal({ initialSelected, onClose, onDone }: SkillModalProps
     return !k || s.name.toLowerCase().includes(k) || s.desc.toLowerCase().includes(k)
   })
 
-  const toggle = (n: string) => setSel((prev) => {
+  const toggle = (effectiveName: string) => setSel((prev) => {
     const next = new Set(prev)
-    next.has(n) ? next.delete(n) : next.add(n)
+    next.has(effectiveName) ? next.delete(effectiveName) : next.add(effectiveName)
     return next
   })
 
@@ -62,13 +62,23 @@ export function SkillModal({ initialSelected, onClose, onDone }: SkillModalProps
         <div className="sm-list">
           {rows.length ? rows.map((s) => (
             <button
-              key={s.name}
-              className={`si-row${sel.has(s.name) ? ' on' : ''}`}
+              key={s.effectiveName}
+              className={`si-row${sel.has(s.effectiveName) ? ' on' : ''}`}
               type="button"
-              onClick={() => toggle(s.name)}
+              onClick={() => toggle(s.effectiveName)}
             >
               <span className="si-main">
-                <span className="si-name">{s.name}</span>
+                <span className="si-name">
+                  {s.name}
+                  {s.globalIn.length > 0 && (
+                    <span
+                      className="si-shadow"
+                      title={`全局 ${s.globalIn.map(e => e === 'claude' ? 'Claude' : 'Codex').join('·')} 已有同名，会覆盖注入的这个（个人级 > 项目级），注入将不生效`}
+                    >
+                      ⚠ {s.globalIn.map(e => e === 'claude' ? 'Claude' : 'Codex').join('·')} 全局
+                    </span>
+                  )}
+                </span>
                 <span className="si-desc">{s.desc}</span>
               </span>
               <span className="si-check">✓</span>

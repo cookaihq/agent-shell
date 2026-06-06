@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import type { AgentEvent } from '@agent-shell/contracts'
 import { runClaudeSdkTurn, type ClaudeSdkTurnOpts } from '../claudeSdk'
+import type { ImageInlineBlock } from '../../session/imageInline'
 
 /** 可控假 query()：测试往里 emit SDKMessage、close 结束流；捕获 options（含 canUseTool）；记录控制方法调用。 */
 function makePushableQuery() {
@@ -120,6 +121,47 @@ describe('runClaudeSdkTurn — 消费 query() 流并映射', () => {
     expect(raws.some((r) => r.type === 'stream_event')).toBe(false)   // 分片被跳过
     expect(raws).toContainEqual(asst)                                  // 最终 assistant 原样
     expect(raws.some((r) => r.type === 'result')).toBe(true)
+  })
+})
+
+describe('runClaudeSdkTurn — 携带 base64 image 块组装 user content', () => {
+  const imgBlock: ImageInlineBlock = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } }
+
+  /** 读 InputStream 里下一条 SDKUserMessage（fake query 不消费 prompt，队列原样留存）。 */
+  async function nextUserContent(h: ReturnType<typeof harness>): Promise<any> {
+    const it = (h.fake.getPromptIterable() as AsyncIterable<any>)[Symbol.asyncIterator]()
+    const r = await it.next()
+    return r.value.message.content
+  }
+
+  it('首轮带 images → content = [image 块, {type:text}]', async () => {
+    const h = harness({ images: [imgBlock] })
+    expect(await nextUserContent(h)).toEqual([imgBlock, { type: 'text', text: 'hi' }])
+    h.fake.close()
+    await h.handle.done
+  })
+
+  it('无 images → content 仍是 [{type:text}]（现状不变）', async () => {
+    const h = harness()
+    expect(await nextUserContent(h)).toEqual([{ type: 'text', text: 'hi' }])
+    h.fake.close()
+    await h.handle.done
+  })
+
+  it('纯图无文字（text=空）→ content 仍含 image 块（兜底补空 text）', async () => {
+    const h = harness({ prompt: '', images: [imgBlock] })
+    expect(await nextUserContent(h)).toEqual([imgBlock, { type: 'text', text: '' }])
+    h.fake.close()
+    await h.handle.done
+  })
+
+  it('续投 pushUser(text, images) → 下一条 content 带 image 块', async () => {
+    const h = harness()
+    await nextUserContent(h) // 消费首条（无图）
+    h.handle.pushUser('next', [imgBlock])
+    expect(await nextUserContent(h)).toEqual([imgBlock, { type: 'text', text: 'next' }])
+    h.fake.close()
+    await h.handle.done
   })
 })
 

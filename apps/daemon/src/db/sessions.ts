@@ -69,13 +69,12 @@ export function setSessionVersions(db: Database.Database, id: string, v: { claud
 }
 
 /**
- * 硬删会话：在一个事务里级联清掉它的 messages + usage，再删会话行本身。
- * messages/usage 仅靠 session_id 关联、无外键 CASCADE，必须手动删，否则留下孤儿数据。
+ * 硬删会话：在一个事务里级联清掉它的 usage，再删会话行本身。
+ * usage 仅靠 session_id 关联、无外键 CASCADE，必须手动删，否则留下孤儿数据。
  * 返回是否真删到了会话（false = 该 id 不存在）。
  */
 export function deleteSession(db: Database.Database, id: string): boolean {
   const tx = db.transaction((sid: string): boolean => {
-    db.prepare('DELETE FROM messages WHERE session_id = ?').run(sid)
     db.prepare('DELETE FROM usage WHERE session_id = ?').run(sid)
     return db.prepare('DELETE FROM sessions WHERE id = ?').run(sid).changes > 0
   })

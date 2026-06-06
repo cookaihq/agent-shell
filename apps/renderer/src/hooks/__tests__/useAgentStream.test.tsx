@@ -50,7 +50,7 @@ describe('useAgentStream', () => {
     ])
   })
 
-  it('分发交互事件 permission_request / ask_user_question / permission_resolved（白名单从契约派生，不漏）', async () => {
+  it('engine=claude：分发交互事件 permission_request / ask_user_question / permission_resolved（切片私有 schema，不漏 → 防卡死）', async () => {
     fetchMock.mockImplementationOnce(async () => ({
       ok: true,
       body: streamBody([
@@ -61,9 +61,37 @@ describe('useAgentStream', () => {
       ]),
     }) as unknown as Response)
     const evs: { type: string }[] = []
-    renderHook(() => useAgentStream('s1', (e) => evs.push(e as { type: string }), true))
+    renderHook(() => useAgentStream('s1', (e) => evs.push(e as { type: string }), true, 'claude'))
     await waitFor(() => expect(evs).toHaveLength(4))
     expect(evs.map((e) => e.type)).toEqual(['permission_request', 'ask_user_question', 'permission_resolved', 'turn_end'])
+  })
+
+  it('坏帧 / 未知帧丢弃，合法帧照常分发（safeParse 失败即丢，保住防卡死语义）', async () => {
+    fetchMock.mockImplementationOnce(async () => ({
+      ok: true,
+      body: streamBody([
+        sse('garbage', { type: 'nonsense' }),                       // 未知 type → safeParse 失败 → 丢
+        'event: bad\ndata: not-json\n\n',                           // 非 JSON → 丢
+        sse('permission_request', { type: 'permission_request', requestId: 'r1' }),   // 缺 toolName/input → 不合法 → 丢
+        sse('message', { type: 'message', text: 'ok' }),            // 合法共享事件 → 过
+      ]),
+    }) as unknown as Response)
+    const evs: { type: string }[] = []
+    renderHook(() => useAgentStream('s1', (e) => evs.push(e as { type: string }), true, 'claude'))
+    await waitFor(() => expect(evs).toEqual([{ type: 'message', text: 'ok' }]))
+  })
+
+  it('engine=codex：permission_request 不被接受（仅共享 schema），共享事件照常分发', async () => {
+    fetchMock.mockImplementationOnce(async () => ({
+      ok: true,
+      body: streamBody([
+        sse('permission_request', { type: 'permission_request', requestId: 'r1', toolName: 'Write', input: {} }),
+        sse('message', { type: 'message', text: 'hi' }),
+      ]),
+    }) as unknown as Response)
+    const evs: { type: string }[] = []
+    renderHook(() => useAgentStream('s1', (e) => evs.push(e as { type: string }), true, 'codex'))
+    await waitFor(() => expect(evs).toEqual([{ type: 'message', text: 'hi' }]))
   })
 
   it('有 bridge token 时带 AUTH_HEADER 请求头', async () => {

@@ -6,6 +6,7 @@ import type {
   ModelInfo,
   RewindFilesResult,
   SDKUserMessage,
+  SlashCommand,
   Query,
 } from '@anthropic-ai/claude-agent-sdk'
 import { randomUUID } from 'node:crypto'
@@ -15,6 +16,7 @@ import { createClaudeObjectParser } from './stream/claude'
 import { sanitizeEnv } from './env'
 import { channelDataDir } from '../paths'
 import type { AuthStrategy } from './types'
+import type { ImageInlineBlock } from '../session/imageInline'
 
 // Issue 1 诊断：SDK 把 spawn 真错误（errno/stderr）替换成「exists but failed to launch」泛化消息后再抛。
 // 这里把完整 error（所有自有属性 + cause 链 + stack）连同 cwd/PATH 上下文落盘，先拿到真因再决定修法，不臆测。
@@ -40,8 +42,9 @@ function logClaudeError(context: Record<string, unknown>, err: unknown): void {
   console.error('[claudeSdk] query 失败:', JSON.stringify(entry))
 }
 
-/** claude 凭证 env（与 CLI claudeDef 一致）；SDK 与 CLI spawn 同一 claude 二进制、读同样的 env。 */
-const CLAUDE_AUTH: AuthStrategy = { apiKeyEnv: 'ANTHROPIC_API_KEY', baseUrlEnv: 'ANTHROPIC_BASE_URL' }
+/** claude 凭证 env（与 CLI claudeDef 一致）；SDK 与 CLI spawn 同一 claude 二进制、读同样的 env。
+ *  导出供命令探针（claudeCommandProbe）复用同一套 env 净化口径，避免两条解析路径漂移。 */
+export const CLAUDE_AUTH: AuthStrategy = { apiKeyEnv: 'ANTHROPIC_API_KEY', baseUrlEnv: 'ANTHROPIC_BASE_URL', altKeyEnv: 'ANTHROPIC_AUTH_TOKEN' }
 
 /** query() 的形态：streaming-input 模式 prompt 为 AsyncIterable<SDKUserMessage>。可注入（测试）。 */
 export type ClaudeQueryFn = (args: { prompt: AsyncIterable<SDKUserMessage>; options?: Options }) => Query
@@ -59,6 +62,8 @@ export interface ClaudeSdkTurnOpts {
   cwd: string
   model: string
   prompt: string
+  /** 首轮内联图片块（base64 image）；无则纯文本。 */
+  images?: ImageInlineBlock[]
   /** 5 档之一，默认 default（default 时 canUseTool 才触发逐工具授权）。 */
   permissionMode?: PermissionMode
   effort?: string
@@ -68,7 +73,7 @@ export interface ClaudeSdkTurnOpts {
   resumableId?: string
   baseEnv?: NodeJS.ProcessEnv
   /** BYOK（V1 不传）。 */
-  creds?: { baseUrl?: string; apiKey?: string }
+  creds?: { baseUrl?: string; apiKey?: string; keyEnv?: 'api_key' | 'auth_token' }
   enableFileCheckpointing?: boolean
   outputFormat?: { type: 'json_schema'; schema: Record<string, unknown> }
   onEvent: (ev: AgentEvent) => void
@@ -78,6 +83,8 @@ export interface ClaudeSdkTurnOpts {
   onRawMessage?: (msg: unknown) => void
   /** init 系统消息到达：带 SDK 会话 id 与 claude_code_version。 */
   onInit?: (info: { sessionId: string; claudeCodeVersion?: string }) => void
+  /** commands_changed 系统消息到达：SDK 推送完整新命令清单（mid-session 动态发现技能等）→ 调用方 REPLACE 缓存。 */
+  onCommandsChanged?: (commands: SlashCommand[]) => void
   /** 注入假 query（测试）；默认动态加载真实 SDK query。 */
   queryFn?: ClaudeQueryFn
   /** idle 看门狗：距上次 SDK 消息超此毫秒数无活动 → 中断兜底。0/省略 = 不启用。 */
@@ -92,8 +99,8 @@ export interface ClaudeSdkHandle {
   /** 与 RunTurnHandle 同形（exitCode 对 SDK 恒 null）：generator 完成 / 中断后 resolve。 */
   done: Promise<{ exitCode: number | null }>
   interrupt: (graceMs?: number) => void
-  /** 往同一会话续投下一条 user 消息（streaming-input 排队）。 */
-  pushUser: (text: string) => void
+  /** 往同一会话续投下一条 user 消息（streaming-input 排队）；可带 base64 image 块（续投轮内联图片）。 */
+  pushUser: (text: string, imageBlocks?: ImageInlineBlock[]) => void
   /** 结束输入流，让 query 跑完退出。 */
   endInput: () => void
   /** 解决一个挂起的授权/提问（renderer 回执）。未知 requestId 静默忽略（过期）。 */
@@ -102,6 +109,8 @@ export interface ClaudeSdkHandle {
   setEffort: (effort: string) => Promise<void>
   setModel: (model: string) => Promise<void>
   supportedModels: () => Promise<ModelInfo[]>
+  /** init 时一次性快照命令清单（SDK 文档：supportedCommands() 仅在 initialize 捕获、不反映 mid-session 变更）。 */
+  supportedCommands: () => Promise<SlashCommand[]>
   rewindFiles: (userMessageId: string, opts?: { dryRun?: boolean }) => Promise<RewindFilesResult>
   /** 最近一次可回退检查点（SDK 赋予 user 消息的 uuid，从流里嗅探）。无则 undefined。 */
   lastCheckpointId: () => string | undefined
@@ -113,9 +122,13 @@ class InputStream implements AsyncIterable<SDKUserMessage> {
   private waiting: ((r: IteratorResult<SDKUserMessage>) => void) | null = null
   private ended = false
 
-  push(text: string, uuid?: string): void {
+  push(text: string, uuid?: string, imageBlocks?: ImageInlineBlock[]): void {
     // uuid 由宿主分配 → 该 uuid 即文件检查点 id（rewindFiles 据此回退到本条 user 消息前的状态）
-    const msg = { type: 'user', message: { role: 'user', content: [{ type: 'text', text }] }, parent_tool_use_id: null, ...(uuid ? { uuid } : {}) } as unknown as SDKUserMessage
+    // 有图：content = [...image 块, {type:text}]（镜像 Claudian buildUserContentBlocks）；无图：维持现状纯文本块。
+    const content = imageBlocks && imageBlocks.length
+      ? [...imageBlocks, { type: 'text', text }]
+      : [{ type: 'text', text }]
+    const msg = { type: 'user', message: { role: 'user', content }, parent_tool_use_id: null, ...(uuid ? { uuid } : {}) } as unknown as SDKUserMessage
     if (this.waiting) { const w = this.waiting; this.waiting = null; w({ done: false, value: msg }) }
     else this.queue.push(msg)
   }
@@ -142,8 +155,8 @@ export function runClaudeSdkTurn(opts: ClaudeSdkTurnOpts): ClaudeSdkHandle {
   // 每条 user prompt 宿主自分配 uuid → 即文件检查点 id。lastCheckpointId 记最近一条（rewindFiles 默认回退到此）。
   const genUuid = opts.genCheckpointId ?? (() => randomUUID())
   let lastCheckpointId: string | undefined
-  const pushPrompt = (text: string): void => { const id = genUuid(); lastCheckpointId = id; input.push(text, id) }
-  pushPrompt(opts.prompt)
+  const pushPrompt = (text: string, imageBlocks?: ImageInlineBlock[]): void => { const id = genUuid(); lastCheckpointId = id; input.push(text, id, imageBlocks) }
+  pushPrompt(opts.prompt, opts.images)
 
   const env = sanitizeEnv(CLAUDE_AUTH, opts.baseEnv ?? process.env, opts.creds)
   const parse = createClaudeObjectParser()
@@ -281,6 +294,11 @@ export function runClaudeSdkTurn(opts: ClaudeSdkTurnOpts): ClaudeSdkHandle {
             opts.onInit?.({ sessionId: sid, claudeCodeVersion: (msg as any).claude_code_version })
           }
         }
+        // SDK fire-and-forget 推送：mid-session 命令清单变更（如子目录里发现新技能）→ 调用方 REPLACE 缓存
+        if ((msg as any)?.type === 'system' && (msg as any)?.subtype === 'commands_changed') {
+          const cmds = (msg as any).commands
+          if (Array.isArray(cmds)) opts.onCommandsChanged?.(cmds as SlashCommand[])
+        }
       }
       finished = true   // generator 完成 → query 进程退出，控制方法不可再用（否则崩 daemon）
       clearIdle()
@@ -308,7 +326,7 @@ export function runClaudeSdkTurn(opts: ClaudeSdkTurnOpts): ClaudeSdkHandle {
   return {
     done,
     interrupt: () => { interrupted = true; cancelAll(); emitTerminal('aborted'); if (!finished) void ready.then((qq) => qq.interrupt()).catch(() => {}) },
-    pushUser: (text: string) => { turnActive = true; resetIdle(); pushPrompt(text) },   // 新一轮开始 → 重启看门狗 + 新检查点
+    pushUser: (text: string, imageBlocks?: ImageInlineBlock[]) => { turnActive = true; resetIdle(); pushPrompt(text, imageBlocks) },   // 新一轮开始 → 重启看门狗 + 新检查点
     endInput: () => input.end(),
     resolveDecision: (requestId, decision) => {
       if (decision.behavior === 'allow') {
@@ -329,6 +347,7 @@ export function runClaudeSdkTurn(opts: ClaudeSdkTurnOpts): ClaudeSdkHandle {
     setEffort: async (effort) => { await ctrl((qq) => qq.applyFlagSettings({ effortLevel: effort as never }), undefined) },
     setModel: async (model) => { await ctrl((qq) => qq.setModel(model), undefined) },
     supportedModels: async () => ctrl((qq) => qq.supportedModels(), [] as ModelInfo[]),
+    supportedCommands: async () => ctrl((qq) => qq.supportedCommands(), [] as SlashCommand[]),
     rewindFiles: async (id, o) => ctrl((qq) => qq.rewindFiles(id, o), { canRewind: false, error: '会话已结束，无法回退（请在会话进行中操作）' } as RewindFilesResult),
     lastCheckpointId: () => lastCheckpointId,
   }

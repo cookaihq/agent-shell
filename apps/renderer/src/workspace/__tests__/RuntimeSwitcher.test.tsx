@@ -40,10 +40,10 @@ describe('RuntimeSwitcher 渲染', () => {
   })
 
   it('codex 引擎显示 Codex CLI', () => {
-    renderWithCtx(makeCtx('codex', 'GPT 5.5'))
+    renderWithCtx(makeCtx('codex', 'gpt-5.5'))   // value=真实 slug
     // "Codex CLI" 在 chip isw-primary 和弹窗 ag-nm 里都有
     expect(screen.getAllByText('Codex CLI').length).toBeGreaterThan(0)
-    expect(screen.getAllByText('GPT 5.5').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('GPT 5.5').length).toBeGreaterThan(0)   // 展示 label
   })
 
   it('默认弹窗关闭（isw-pop 无 open class）', () => {
@@ -85,7 +85,7 @@ describe('RuntimeSwitcher 弹窗开合 (wirePopover)', () => {
 describe('RuntimeSwitcher dispatch 交互', () => {
   it('点 claude 代理按钮 → dispatch SET_AGENT claude', () => {
     const dispatch = vi.fn()
-    const runtime = initialRuntime('codex', 'GPT 5.5')
+    const runtime = initialRuntime('codex', 'gpt-5.5')
     renderWithCtx(runtime, dispatch)
     // 先打开弹窗
     const chip = document.querySelector('.isw-chip')!

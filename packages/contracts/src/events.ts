@@ -8,12 +8,18 @@ import { z } from 'zod'
 export const MessageEvent = z.object({ type: z.literal('message'), text: z.string(), streaming: z.boolean().optional(), parentToolUseId: z.string().optional() })
 // elapsedMs：思考块从 content_block_start 到 content_block_stop 的耗时（daemon 权威计时），用于折叠后显示「思考了 Xs」（Issue 17）。
 export const ThinkingEvent = z.object({ type: z.literal('thinking'), text: z.string(), elapsedMs: z.number().int().nonnegative().optional(), parentToolUseId: z.string().optional() })
+/** 中立工具种类（每个切片 daemon parser 把原生工具名归一到这一套；renderer 按它渲染，不认 Agent 原生名）。 */
+export const NeutralTool = z.enum(['read', 'bash', 'edit', 'write', 'todo', 'skill'])
+export type NeutralTool = z.infer<typeof NeutralTool>
+
 export const ToolUseEvent = z.object({
   type: z.literal('tool_use'),
   id: z.string(),
   name: z.string(),
   input: z.unknown(),
   parentToolUseId: z.string().optional(),
+  /** 切片归一后的中立工具种类；缺省 → renderer 降级到 kindOf(name)（claude 兼容路径）。 */
+  tool: NeutralTool.optional(),
 })
 export const ToolResultEvent = z.object({
   type: z.literal('tool_result'),
@@ -29,7 +35,15 @@ export const UsageEvent = z.object({
   costUsd: z.number().nonnegative().optional(),
   // 模型上下文窗口大小（来自 SDKResultMessage.modelUsage[*].contextWindow）：替掉 CtxMeter 硬编码的 200k 占位。
   contextWindow: z.number().int().positive().optional(),
+  /** 上下文真实占用 = input + cache_creation + cache_read（CtxMeter 百分比用它，不用 inputTokens）。 */
+  contextTokens: z.number().int().nonnegative().optional(),
+  /** contextWindow 是否来自运行时权威值（true）还是切片模型表估算/重载（false）。 */
+  contextWindowIsAuthoritative: z.boolean().optional(),
 })
+/** 一轮开始：running 状态机入口，外壳不靠「识别内容事件」反推 running（spec §4.4）。 */
+export const TurnStartEvent = z.object({ type: z.literal('turn_start') })
+/** 上下文压缩边界（claude compact_boundary）：外壳据此重置上下文基线 + 插中立分隔。 */
+export const ContextCompactedEvent = z.object({ type: z.literal('context_compacted') })
 export const TurnEndEvent = z.object({
   type: z.literal('turn_end'),
   stopReason: z.string(),
@@ -93,6 +107,21 @@ export const StructuredOutputEvent = z.object({
   data: z.unknown(),
 })
 
+/** 斜杠命令（与 SDK SlashCommand / renderer SlashCommand 同形）：commands_changed 事件载荷的元素形。 */
+export const SlashCommandShape = z.object({
+  name: z.string(),
+  description: z.string(),
+  argumentHint: z.string(),
+  aliases: z.array(z.string()).optional(),
+})
+
+/** 命令清单中途变更（claude SDK fire-and-forget 推送 commands_changed）：daemon 经会话 SSE 转发整份新清单，
+ *  让「弹框正开着」的命令列表当场刷新，不必关掉重开（slash-command-probe P1）。commands=完整新清单（REPLACE 语义）。 */
+export const CommandsChangedEvent = z.object({
+  type: z.literal('commands_changed'),
+  commands: z.array(SlashCommandShape),
+})
+
 // ── 子代理（Task 派生的 subagent）生命周期事件（spec §2.4/§6） ──
 /** 子代理实时/最终用量（来自 SDK task_progress/task_notification 的 usage，camelCase 化）。 */
 export const SubagentUsage = z.object({
@@ -106,7 +135,9 @@ export const SubagentUsage = z.object({
  *  - phase 'progress' ← task_progress（实时累计 usage/lastToolName/summary，驱动卡片头实时刷新）
  *  - phase 'ended'    ← task_notification（终态 status + 定格 usage）
  * toolUseId = 派生它的 Task tool_use id（= 子消息的 parentToolUseId），renderer 据此把内部时间线归到本子代理；
- * SDK 上 tool_use_id 是 optional，纯杂务/local_workflow 可能缺省，此时只能靠 taskId 归右侧面板（spec D14）。
+ * SDK 上 tool_use_id 是 optional（纯杂务/local_workflow 可能缺省），故 reducer 以 taskId 为稳定主键归并。
+ * 注意（spec D14）：无 subagentType 的纯杂务（ambient/housekeeping）本期**不进 Subagent 展示**（形态 B/C），
+ * 由 renderer subagentList 在展示层过滤；contracts/daemon 仍全量透传（形态 A 时间线归并按 toolUseId 需要全量 map）。
  */
 export const SubagentEvent = z.object({
   type: z.literal('subagent'),
@@ -122,12 +153,21 @@ export const SubagentEvent = z.object({
   skipTranscript: z.boolean().optional(),
 })
 
+/** 共享生命周期 + 中立内容事件（跨 Agent 共享；切片私有事件不在内）。renderer 按 engine 取「这个 ∪ 切片 schema」safeParse。 */
+export const SharedLifecycleEvent = z.discriminatedUnion('type', [
+  MessageEvent, ThinkingEvent, ToolUseEvent, ToolResultEvent,
+  UsageEvent, TurnStartEvent, ContextCompactedEvent, TurnEndEvent, ProgressEvent,
+])
+export type SharedLifecycleEvent = z.infer<typeof SharedLifecycleEvent>
+
 export const AgentEvent = z.discriminatedUnion('type', [
   MessageEvent,
   ThinkingEvent,
   ToolUseEvent,
   ToolResultEvent,
   UsageEvent,
+  TurnStartEvent,
+  ContextCompactedEvent,
   TurnEndEvent,
   ProgressEvent,
   PermissionRequestEvent,
@@ -135,6 +175,7 @@ export const AgentEvent = z.discriminatedUnion('type', [
   PermissionResolvedEvent,
   StructuredOutputEvent,
   SubagentEvent,
+  CommandsChangedEvent,
 ])
 export type AgentEvent = z.infer<typeof AgentEvent>
 export type SubagentEvent = z.infer<typeof SubagentEvent>

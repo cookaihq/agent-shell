@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3'
 
-/** V1 schema（v1-spec §3）：projects → sessions → messages/usage。Provider 延后，无 provider_id/providers。 */
+/** V1 schema（v1-spec §3）：projects → sessions → usage。对话记录统一写 transcript JSONL，messages 表已移除。Provider 延后，无 provider_id/providers。 */
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS projects (
   id          TEXT PRIMARY KEY,
@@ -22,14 +22,6 @@ CREATE TABLE IF NOT EXISTS sessions (
   created_at      INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
-CREATE TABLE IF NOT EXISTS messages (
-  id          TEXT PRIMARY KEY,
-  session_id  TEXT NOT NULL,
-  role        TEXT NOT NULL,
-  blocks      TEXT NOT NULL,
-  created_at  INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
 CREATE TABLE IF NOT EXISTS usage (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id     TEXT NOT NULL,
@@ -40,6 +32,35 @@ CREATE TABLE IF NOT EXISTS usage (
   created_at     INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_usage_session ON usage(session_id);
+CREATE TABLE IF NOT EXISTS automations (
+  id          TEXT PRIMARY KEY,
+  name        TEXT NOT NULL,
+  prompt      TEXT NOT NULL,
+  engine      TEXT NOT NULL,
+  model       TEXT NOT NULL,
+  permission  TEXT NOT NULL,
+  categories  TEXT NOT NULL DEFAULT '[]',
+  schedule    TEXT NOT NULL,
+  target      TEXT NOT NULL,
+  enabled     INTEGER NOT NULL DEFAULT 1,
+  next_run_at INTEGER,
+  created_at  INTEGER NOT NULL,
+  updated_at  INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS automation_runs (
+  id            TEXT PRIMARY KEY,
+  automation_id TEXT NOT NULL,
+  trigger       TEXT NOT NULL,
+  status        TEXT NOT NULL,
+  project_id    TEXT NOT NULL,
+  session_id    TEXT,
+  started_at    INTEGER NOT NULL,
+  completed_at  INTEGER,
+  summary       TEXT,
+  error         TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_automation_runs_automation ON automation_runs(automation_id);
+CREATE INDEX IF NOT EXISTS idx_automation_runs_session ON automation_runs(session_id);
 `
 
 /** 已有库补列（幂等）：CREATE TABLE IF NOT EXISTS 不会给老表加新列，需 ALTER。SQLite 无 ADD COLUMN IF NOT EXISTS，先查 table_info。 */

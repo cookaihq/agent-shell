@@ -64,7 +64,7 @@ const PlusIcon = () => (
 // ── 文件类型分流 ───────────────────────────────────────────────────────────────
 type PreviewKind = 'image' | 'pdf' | 'html' | 'markdown' | 'text'
 
-const IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif'])
+export const IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif'])
 
 function kindOfFile(path: string): PreviewKind {
   const ext = path.toLowerCase().split('.').pop() ?? ''
@@ -110,9 +110,14 @@ interface TextContent {
 interface PreviewProps {
   projectId: string
   activeFile: string | null
+  /**
+   * 嵌入模式（如画廊大预览）：隐藏工具栏（刷新 / 地址栏 / 文件名 / 缩放控件 / 在外部打开）
+   * 与缩放快捷键，仅保留按文件类型分流 + HTML 自动适配的内容渲染。复用同一套渲染逻辑。
+   */
+  embedded?: boolean
 }
 
-export function Preview({ projectId, activeFile }: PreviewProps) {
+export function Preview({ projectId, activeFile, embedded = false }: PreviewProps) {
   // 文本/markdown 内容（图片/PDF/HTML 走 rawUrl，不在此加载）
   const [textData, setTextData] = useState<TextContent | null>(null)
   const [loading, setLoading] = useState(false)
@@ -223,7 +228,7 @@ export function Preview({ projectId, activeFile }: PreviewProps) {
     setZoom(1)
     setOpenErr(null)
     setLoadFailed(false)
-    setAddr('')
+    setAddr(activeFile ?? '')   // 文件预览态：地址栏默认显示当前文件的项目内相对路径（Issue 9）
     naturalRef.current = null
     setHtmlEffScale(1)
     if (!activeFile) { setTextData(null); return }
@@ -237,8 +242,9 @@ export function Preview({ projectId, activeFile }: PreviewProps) {
     return () => { off = true }
   }, [projectId, activeFile, reloadKey])
 
-  // 捕获 Cmd/Ctrl +/-/0 —— 只缩放预览，不缩放整页
+  // 捕获 Cmd/Ctrl +/-/0 —— 只缩放预览，不缩放整页（嵌入模式无缩放控件，不绑定，避免与主预览面板重复抢键）
   useEffect(() => {
+    if (embedded) return
     function onKeyDown(e: KeyboardEvent) {
       if ((!e.metaKey && !e.ctrlKey) || e.altKey) return
       if (e.key === '=' || e.key === '+') { e.preventDefault(); applyZoom('in') }
@@ -247,7 +253,7 @@ export function Preview({ projectId, activeFile }: PreviewProps) {
     }
     window.addEventListener('keydown', onKeyDown, { capture: true })
     return () => window.removeEventListener('keydown', onKeyDown, { capture: true })
-  }, [applyZoom])
+  }, [applyZoom, embedded])
 
   // HTML：手动 zoom 变化时重算适配（叠乘在适配基准上）
   useEffect(() => {
@@ -274,6 +280,8 @@ export function Preview({ projectId, activeFile }: PreviewProps) {
 
   const submitAddr = (e: React.FormEvent) => {
     e.preventDefault()
+    // 文件预览态（非浏览器模式）下地址栏内容仍等于当前文件路径 → 路径不是 URL，不跳转（Issue 9）
+    if (browserUrl === null && addr.trim() === activeFile) return
     const url = normalizeUrl(addr)
     if (url) { setBrowserUrl(url); setZoom(1) }
   }
@@ -293,7 +301,8 @@ export function Preview({ projectId, activeFile }: PreviewProps) {
   const fill = browserUrl !== null || kind === 'pdf' || kind === 'html'
 
   return (
-    <div className="preview-wrap">
+    <div className={`preview-wrap${embedded ? ' is-embedded' : ''}`}>
+      {!embedded && (
       <div className="preview-toolbar">
         <button className="chat-hicon" title="刷新" type="button" onClick={refresh}>
           <RefreshIcon />
@@ -310,12 +319,9 @@ export function Preview({ projectId, activeFile }: PreviewProps) {
           />
         </form>
         {browserUrl && (
-          <button className="chat-hicon" type="button" title="关闭浏览器，返回文件预览" onClick={() => { setBrowserUrl(null); setAddr('') }}>
+          <button className="chat-hicon" type="button" title="关闭浏览器，返回文件预览" onClick={() => { setBrowserUrl(null); setAddr(activeFile ?? '') }}>
             ✕
           </button>
-        )}
-        {!browserUrl && activeFile && (
-          <span className="preview-fname" title={activeFile}>{activeFile.split('/').pop()}</span>
         )}
         {showZoom && (
           <div className="preview-zoom-ctrl">
@@ -340,6 +346,7 @@ export function Preview({ projectId, activeFile }: PreviewProps) {
           <OpenExternalIcon />
         </button>
       </div>
+      )}
 
       <div className={`preview-stage${fill ? ' is-fill' : ''}`}>
         {/* 浏览器模式（Issue 22）优先 */}

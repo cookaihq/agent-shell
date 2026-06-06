@@ -59,10 +59,40 @@ describe('chatReducer', () => {
     expect(chatReducer(b, { type: 'event', ev: { type: 'turn_end', stopReason: 'aborted' } }).runStatus).toBe('aborted')
   })
 
-  it('空 live turn_end 不产生空 assistant', () => {
+  it('空 live 成功 turn_end 不产生空 assistant', () => {
+    // 成功且无产出的轮（如纯热切换/空响应）不该留空气泡
     let s = chatReducer(initialChat(), { type: 'optimisticUser', text: 'q' })
-    s = chatReducer(s, { type: 'event', ev: { type: 'turn_end', stopReason: 'aborted' } })
+    s = chatReducer(s, { type: 'event', ev: { type: 'turn_end', stopReason: 'end_turn' } })
     expect(s.messages.filter((m) => m.role === 'assistant')).toHaveLength(0)
+  })
+
+  it('空 live 失败 turn_end 产生仅含 run_note 的留痕消息（含真因）', () => {
+    // 失败是历史事实（带真因），即使本轮无正文也留一条内联 run_note 块 → 重载留痕 + 末轮继续入口
+    let s = chatReducer(initialChat(), { type: 'optimisticUser', text: 'q' })
+    s = chatReducer(s, { type: 'event', ev: { type: 'turn_end', stopReason: 'failed', detail: 'credit too low' } })
+    const a = s.messages.filter((m) => m.role === 'assistant')
+    expect(a).toHaveLength(1)
+    expect(a[0].blocks).toEqual([{ type: 'run_note', stopReason: 'failed', detail: 'credit too low' }])
+  })
+
+  it('非空 live 失败 turn_end → run_note 块接在正文之后', () => {
+    let s = chatReducer(initialChat(), { type: 'optimisticUser', text: 'q' })
+    s = chatReducer(s, { type: 'event', ev: { type: 'message', text: '半截' } })
+    s = chatReducer(s, { type: 'event', ev: { type: 'turn_end', stopReason: 'failed', detail: 'boom' } })
+    expect(s.messages.at(-1)!.blocks).toEqual([
+      { type: 'text', text: '半截' },
+      { type: 'run_note', stopReason: 'failed', detail: 'boom' },
+    ])
+  })
+
+  it('loadHistory 按 status 还原失败/中止 runStatus（缺口A：重载也能挂继续按钮）', () => {
+    const failed = chatReducer(initialChat(), { type: 'loadHistory', messages: [], running: false, status: 'failed' })
+    expect(failed.runStatus).toBe('failed')
+    const aborted = chatReducer(initialChat(), { type: 'loadHistory', messages: [], running: false, status: 'aborted' })
+    expect(aborted.runStatus).toBe('aborted')
+    // 运行中优先于落库状态
+    const run = chatReducer(initialChat(), { type: 'loadHistory', messages: [], running: true, status: 'failed' })
+    expect(run.runStatus).toBe('running')
   })
 
   it('usage 累积 liveUsage', () => {
@@ -82,15 +112,54 @@ describe('chatReducer', () => {
     expect(ok.failReason).toBeUndefined()
   })
 
-  it('失败态收到实时内容 → 切回 running 并清 failReason（任务失败灰条不与输出并存）', () => {
+  it('失败态 → turn_start 复活 running 清 failReason，再来内容追加（失败灰条不与输出并存）', () => {
     const b = chatReducer(initialChat(), { type: 'optimisticUser', text: 'q' })
     const failed = chatReducer(b, { type: 'event', ev: { type: 'turn_end', stopReason: 'failed', detail: 'boom' } })
     expect(failed.runStatus).toBe('failed')
-    // 直接来内容事件（非乐观派发路径，如 ChatHeader 续接 / 重连）也要复活
-    const live = chatReducer(failed, { type: 'event', ev: { type: 'message', text: '继续中…' } })
+    // 续接 / 重连：daemon 在新一轮开始发 turn_start（非「识别内容事件反推」）→ 复活并清失败提示
+    const started = chatReducer(failed, { type: 'event', ev: { type: 'turn_start' } })
+    expect(started.runStatus).toBe('running')
+    expect(started.failReason).toBeUndefined()
+    expect(started.liveBlocks).toEqual([])
+    // 随后内容追加进新一轮 live 缓冲
+    const live = chatReducer(started, { type: 'event', ev: { type: 'message', text: '继续中…' } })
     expect(live.runStatus).toBe('running')
-    expect(live.failReason).toBeUndefined()
     expect(live.liveBlocks).toEqual([{ type: 'text', text: '继续中…' }])
+  })
+
+  it('turn_start 单独：失败/完成/idle 态 → running + 清 failReason + 起新 live 缓冲（liveBlocks 为 null 时置 []）', () => {
+    // failed → turn_start
+    const b = chatReducer(initialChat(), { type: 'optimisticUser', text: 'q' })
+    const failed = chatReducer(b, { type: 'event', ev: { type: 'turn_end', stopReason: 'failed', detail: 'boom' } })
+    expect(failed.liveBlocks).toBeNull()
+    const s1 = chatReducer(failed, { type: 'event', ev: { type: 'turn_start' } })
+    expect(s1.runStatus).toBe('running')
+    expect(s1.failReason).toBeUndefined()
+    expect(s1.liveBlocks).toEqual([])
+    // idle 初始态 → turn_start（重连/续接，无 optimisticUser）
+    const s2 = chatReducer(initialChat(), { type: 'event', ev: { type: 'turn_start' } })
+    expect(s2.runStatus).toBe('running')
+    expect(s2.liveBlocks).toEqual([])
+  })
+
+  it('turn_start 幂等：已 running 且 live 已有内容 → 不清空 liveBlocks / messages', () => {
+    let s = chatReducer(initialChat(), { type: 'optimisticUser', text: 'q' })  // running, live=[]
+    s = chatReducer(s, { type: 'event', ev: { type: 'message', text: 'A' } })
+    const before = s.liveBlocks
+    s = chatReducer(s, { type: 'event', ev: { type: 'turn_start' } })
+    expect(s.runStatus).toBe('running')
+    expect(s.liveBlocks).toEqual(before)   // 保留已有 live 缓冲（?? 不覆盖）
+    expect(s.messages.filter((m) => m.role === 'user')).toHaveLength(1)
+  })
+
+  it('context_compacted：仅消费、不改 runStatus / messages（divider 渲染本期 DEFERRED）', () => {
+    let s = chatReducer(initialChat(), { type: 'optimisticUser', text: 'q' })
+    s = chatReducer(s, { type: 'event', ev: { type: 'message', text: 'A' } })
+    const before = s
+    s = chatReducer(s, { type: 'event', ev: { type: 'context_compacted' } })
+    expect(s.runStatus).toBe(before.runStatus)
+    expect(s.messages).toEqual(before.messages)
+    expect(s.liveBlocks).toEqual(before.liveBlocks)
   })
 
   it('progress → 存 liveProgress，不建块', () => {
@@ -151,6 +220,52 @@ describe('chatReducer', () => {
     expect(s.pendingRequests).toHaveLength(1)
     s = chatReducer(s, { type: 'event', ev: { type: 'turn_end', stopReason: 'aborted' } })
     expect(s.pendingRequests).toHaveLength(0)
+  })
+
+  it('回答 AskUserQuestion（permission_resolved，无其它挂起）→ 状态行「正在调用」转「处理中…」（activity 置空）', () => {
+    let s = chatReducer(initialChat(), { type: 'optimisticUser', text: 'q' })
+    // agent 调 AskUserQuestion：progress(tool) + 选择卡挂起
+    s = chatReducer(s, { type: 'event', ev: { type: 'progress', tokens: 1400, activity: { kind: 'tool', tool: 'AskUserQuestion' } } })
+    s = chatReducer(s, { type: 'event', ev: { type: 'ask_user_question', requestId: 'q1', questions: [{ question: '选?', options: [{ label: 'A' }] }] } })
+    expect(s.liveProgress?.activity).toEqual({ kind: 'tool', tool: 'AskUserQuestion' })
+    // 回答 → daemon 发 permission_resolved → 卡片移除 + activity 置空（WorkStatus 显示「处理中…」）
+    s = chatReducer(s, { type: 'event', ev: { type: 'permission_resolved', requestId: 'q1', outcome: 'allow' } })
+    expect(s.pendingRequests).toHaveLength(0)
+    expect(s.liveProgress?.activity).toBeUndefined()
+    expect(s.liveProgress?.tokens).toBe(1400)   // token 计数保留
+  })
+
+  it('permission_resolved 但仍有其它挂起 → 不重置 activity（避免误转）', () => {
+    let s = chatReducer(initialChat(), { type: 'optimisticUser', text: 'q' })
+    s = chatReducer(s, { type: 'event', ev: { type: 'progress', tokens: 100, activity: { kind: 'tool', tool: 'AskUserQuestion' } } })
+    s = chatReducer(s, { type: 'event', ev: { type: 'permission_request', requestId: 'p1', toolName: 'Bash', input: {} } })
+    s = chatReducer(s, { type: 'event', ev: { type: 'permission_request', requestId: 'p2', toolName: 'Write', input: {} } })
+    s = chatReducer(s, { type: 'event', ev: { type: 'permission_resolved', requestId: 'p1', outcome: 'allow' } })
+    expect(s.pendingRequests).toHaveLength(1)
+    expect(s.liveProgress?.activity).toEqual({ kind: 'tool', tool: 'AskUserQuestion' })   // 还有挂起 → 不重置
+  })
+
+  it('thinking 态时 permission_resolved → 不误转处理中（仅 tool 态才转）', () => {
+    let s = chatReducer(initialChat(), { type: 'optimisticUser', text: 'q' })
+    s = chatReducer(s, { type: 'event', ev: { type: 'progress', tokens: 50, activity: { kind: 'thinking' } } })
+    s = chatReducer(s, { type: 'event', ev: { type: 'permission_resolved', requestId: 'x', outcome: 'allow' } })
+    expect(s.liveProgress?.activity).toEqual({ kind: 'thinking' })   // thinking 不动
+  })
+
+  // 子代理（subagent）生命周期累计已平移到 claude 切片私有 reducer（spec §6 Phase 2）：
+  // 见 agents/claude/__tests__/subagent.test.tsx（subagentReduce 直测）。
+  // 此处仅守护「外壳委托：subagent 事件经 action.slice.reduce 累计进 sliceState、不触 messages」。
+  it('外壳委托：subagent 事件经 slice.reduce 累计进 sliceState（外壳不解释其结构）', () => {
+    const slice = {
+      initSliceState: () => ({}),
+      reduce: (st: unknown, ev: { type: string; taskId?: string }) =>
+        ev.type === 'subagent' ? { ...(st as Record<string, unknown>), [ev.taskId!]: ev } : st,
+    }
+    let s = chatReducer(initialChat(), { type: 'optimisticUser', text: 'q' })
+    s = chatReducer(s, { type: 'event', ev: { type: 'subagent', phase: 'started', taskId: 'tk1', toolUseId: 'tu1', subagentType: 'g', description: 'x' }, slice })
+    // 委托累计进 sliceState；messages 不受影响
+    expect((s.sliceState as Record<string, unknown>)['tk1']).toBeDefined()
+    expect(s.messages.filter((m) => m.role === 'assistant')).toHaveLength(0)
   })
 })
 

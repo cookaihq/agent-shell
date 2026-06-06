@@ -3,7 +3,6 @@ import { openDatabase } from '../database'
 import Database from 'better-sqlite3'
 import { initSchema } from '../schema'
 import { createSession, getSession, getSessionsByProject, setResumableId, setSessionStatus, setSessionPinned, setSessionTitle, setSessionRuntime, setSessionVersions, deleteSession } from '../sessions'
-import { appendMessage, getMessages } from '../messages'
 import { recordUsage } from '../usage'
 
 describe('sessions repo', () => {
@@ -104,16 +103,13 @@ describe('sessions repo', () => {
     db.close()
   })
 
-  it('deleteSession 级联删会话 + 它的 messages + usage；删别的会话不受影响；不存在 → false', () => {
+  it('deleteSession 级联删会话 + 它的 usage；删别的会话不受影响；不存在 → false', () => {
     const db = openDatabase(':memory:')
     const a = createSession(db, { projectId: 'p1', engine: 'claude', model: 'opus' })
     const b = createSession(db, { projectId: 'p1', engine: 'claude', model: 'opus' })
-    appendMessage(db, { sessionId: a.id, role: 'user', blocks: [{ type: 'text', text: 'hi' }] })
-    appendMessage(db, { sessionId: a.id, role: 'assistant', blocks: [{ type: 'text', text: 'yo' }] })
     recordUsage(db, { sessionId: a.id, turn: 1, inputTokens: 10, outputTokens: 5, costUsd: 0.01 })
     expect(deleteSession(db, a.id)).toBe(true)
     expect(getSession(db, a.id)).toBeUndefined()
-    expect(getMessages(db, a.id)).toEqual([])
     expect((db.prepare('SELECT COUNT(*) AS c FROM usage WHERE session_id = ?').get(a.id) as { c: number }).c).toBe(0)
     expect(getSession(db, b.id)).toBeDefined()   // 删 a 不动 b
     expect(deleteSession(db, 'nope')).toBe(false)

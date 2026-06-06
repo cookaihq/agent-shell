@@ -85,9 +85,12 @@ describe('M6 端到端会话生命周期', () => {
     await tick()
     expect(getSession(db, sid)).toMatchObject({ status: 'aborted' })
 
-    // 7. 历史落盘验证：q1(user) → q2(user，入队) → a1(codex assistant)，按记录类型核对
-    const types = readRecords(tdir, sid).map((r) => r.type)
-    expect(types).toEqual(['user_prompt', 'user_prompt', 'assistant_blocks'])
+    // 7. 历史落盘验证：q1(user) → q2(user，入队) → a1(codex assistant) → q2 轮中止的 run_note 留痕，按记录类型核对
+    //    第 4 条 assistant_blocks = 第二轮（q2）被 interrupt 时落的「已中止」run_note 块：中止是历史事实，
+    //    随历史落库 → 重载留痕 + 继续入口（旧设计底部条不落库，重载即丢；此处端到端守护新行为）。
+    const recs = readRecords(tdir, sid)
+    expect(recs.map((r) => r.type)).toEqual(['user_prompt', 'user_prompt', 'assistant_blocks', 'assistant_blocks'])
+    expect((recs.at(-1)!.raw as { blocks?: unknown[] }).blocks).toEqual([{ type: 'run_note', stopReason: 'aborted' }])
 
     ac.abort()
     await reader.cancel().catch(() => {})

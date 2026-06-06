@@ -1,64 +1,96 @@
 /**
- * ModelPill.tsx — Task 16
+ * ModelPill.tsx — 模型胶囊 + model-pop 弹窗（外壳件，零 Agent 分支）
  *
- * 模型胶囊 + model-pop 弹窗
- * 高保真对照 app.js renderModelPop(L177-208) + model-btn IIFE(L603-628)
+ * 消费 RuntimeContext（useRuntime）+ 当前引擎切片 chatUIConfig，渲染切片返回的描述符：
+ *   - 脸：getModelLabel + getRuntimeChips（dot+tag / tag）
+ *   - 弹窗：getModeSelector（claude 权限 1 段 / codex 审批+沙箱 2 段）+ getEffortSection + getModelSection
  *
- * 消费 RuntimeContext（useRuntime），只改前端状态，不调任何后端 api。
- *
- * 脸：.model-btn > .mb-text > .model-name + .mb-extra
- *   mb-extra：chipPerm → .mb-dot(背景色) + .mb-tag(text) + chipEffort → .mb-tag(effort)
- *             中间 .mb-sep「·」
- *
- * 弹窗 .model-pop（点 model-btn 开合、点外部关）：
- *   claude → 权限段(CLAUDE_MODES) + Effort段 + 模型段
- *   codex  → 审批策略段(CODEX_APPROVAL) + 沙箱级别段(CODEX_SANDBOX) + Effort段 + 模型段
+ * 只改前端状态（dispatch 中立 action），不调任何后端 api（动态模型列表除外）。
  */
 
 import { useState, useEffect, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import { api } from '../api/client'
-import {
-  useRuntime,
-  chipPerm,
-  chipEffort,
-  RISK_COLOR,
-  CLAUDE_MODES,
-  CODEX_APPROVAL,
-  CODEX_SANDBOX,
-  EFFORTS,
-  CLI_MODELS,
-  AGENT_LABEL,
-  modelLabel,
-  type ClaudeMode,
-  type CodexApproval,
-  type CodexSandbox,
-} from './runtimeState'
-import type { Engine } from '../api/types'
+import { useRuntime, RISK_COLOR, slotsOf } from './runtimeState'
+import type { RuntimeState, RuntimeAction } from './runtimeState'
+import { SLICES } from './agents/registry'
+import type { UIModelOption, ModeSegment } from './agents/types'
+import type { SlashCommand } from '../api/types'
+import { SkillModal } from '../entry/SkillModal'
 
-/** 动态模型项（来自 daemon supportedModels）：value=API id（发给 daemon），displayName=展示名，description=副标题（能力描述，含 1M 等）。 */
+// 右箭头（折叠行尾，点击呼出 flyout）。移植自原型 app.js CARET。
+const CARET_SVG = (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M9 18l6-6-6-6" />
+  </svg>
+)
+
+/** 动态模型项（来自 daemon supportedModels）：value=API id，displayName=展示名，description=副标题。 */
 export interface DynModel { value: string; displayName: string; description?: string }
 
-export function ModelPill({ sessionId }: { sessionId?: string } = {}) {
+/** dynModels（{value,displayName}）→ 切片消费的 UIModelOption（{value,label}）。 */
+function toUIModels(dyn: DynModel[] | null): UIModelOption[] | null {
+  return dyn ? dyn.map((m) => ({ value: m.value, label: m.displayName, description: m.description })) : null
+}
+
+export function ModelPill({
+  sessionId,
+  commands,
+  onInsertCommand,
+  onOpenCommands,
+  projectId,
+}: {
+  sessionId?: string
+  /** 动态命令（claude，来自 SDK supportedCommands/commands_changed）。点行把 /name 填进输入框。 */
+  commands?: SlashCommand[]
+  onInsertCommand?: (name: string) => void
+  /** 打开弹框时按需取命令（取数从 mount 一次性 → 打开时取）；仅支持动态命令的切片（claude）触发，不为 codex 探针。 */
+  onOpenCommands?: () => void
+  /** 当前已打开项目 id；有则「注入技能」完成后对该项目软链选中的技能。 */
+  projectId?: string
+} = {}) {
   const { runtime, dispatch } = useRuntime()
   const [open, setOpen] = useState(false)
-  // 动态模型列表（claude）：打开弹窗时拉一次活动会话的 supportedModels；null=无活会话 → 回落静态 CLI_MODELS
+  const [skillOpen, setSkillOpen] = useState(false)
+  // 注入技能反馈 toast（复用 .proj-toast；自动消失）
+  const [toast, setToast] = useState<string | null>(null)
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const showToast = (msg: string) => {
+    setToast(msg)
+    if (toastTimer.current) clearTimeout(toastTimer.current)
+    toastTimer.current = setTimeout(() => setToast(null), 2200)
+  }
+  useEffect(() => () => { if (toastTimer.current) clearTimeout(toastTimer.current) }, [])
+  // 动态模型列表（支持动态的切片）：打开弹窗时拉一次活动会话的 supportedModels；null=无活会话 → 回落静态
   const [dynModels, setDynModels] = useState<DynModel[] | null>(null)
   const btnRef = useRef<HTMLButtonElement>(null)
   const popRef = useRef<HTMLDivElement>(null)
 
+  const slice = SLICES[runtime.engine]
+  const ui = slice.chatUIConfig
+
   useEffect(() => {
-    if (!open || !sessionId || runtime.agent !== 'claude') return
+    if (!open || !sessionId || !ui.supportsDynamicModels) return
     let off = false
     api.models(sessionId).then((r) => { if (!off) setDynModels(r.models) }).catch(() => {})
     return () => { off = true }
-  }, [open, sessionId, runtime.agent])
+  }, [open, sessionId, ui.supportsDynamicModels])
+
+  // 打开弹框时按需取命令（不在 mount 取）：仅 claude（supportsDynamicModels）触发，避免为 codex 起 claude 探针。
+  // 取数与双入口（有 sessionId 走会话、无走项目）由 Composer 的 onOpenCommands 实现。
+  useEffect(() => {
+    if (open && ui.supportsDynamicModels) onOpenCommands?.()
+  }, [open, ui.supportsDynamicModels, onOpenCommands])
 
   // 点外部关弹窗（移植 model-btn IIFE L626）
   useEffect(() => {
     if (!open) return
     const handler = (e: MouseEvent) => {
       const target = e.target as Node
+      // flyout 是 portal 到 body 的，逻辑上属于本弹窗：点它内部不算「外部」
+      const inFlyout = (target as HTMLElement).closest?.('.model-flyout') != null
       if (
+        !inFlyout &&
         popRef.current &&
         !popRef.current.contains(target) &&
         btnRef.current &&
@@ -78,8 +110,8 @@ export function ModelPill({ sessionId }: { sessionId?: string } = {}) {
     }
   }, [open])
 
-  const perm = chipPerm(runtime)
-  const effort = chipEffort(runtime)
+  const dyn = toUIModels(dynModels)
+  const chips = ui.getRuntimeChips(slotsOf(runtime))
 
   return (
     <>
@@ -87,28 +119,22 @@ export function ModelPill({ sessionId }: { sessionId?: string } = {}) {
         ref={btnRef}
         className={`model-btn${open ? ' is-open' : ''}`}
         type="button"
-        aria-label={runtime.model}
+        aria-label={ui.getModelLabel(runtime.model, dyn)}
         onClick={(e) => {
           e.stopPropagation()
           setOpen((v) => !v)
         }}
       >
         <span className="mb-text">
-          <span className="model-name">{modelLabel(runtime.agent, runtime.model, dynModels)}</span>
+          <span className="model-name">{ui.getModelLabel(runtime.model, dyn)}</span>
           <span className="mb-extra">
-            {perm && (
-              <>
+            {chips.map((chip) => (
+              <span key={chip.key} className="mb-chip-wrap">
                 <span className="mb-sep">·</span>
-                <span className="mb-dot" style={{ background: RISK_COLOR[perm.risk] }} />
-                <span className="mb-tag">{perm.text}</span>
-              </>
-            )}
-            {effort && (
-              <>
-                <span className="mb-sep">·</span>
-                <span className="mb-tag">{effort}</span>
-              </>
-            )}
+                {chip.risk && <span className="mb-dot" style={{ background: RISK_COLOR[chip.risk] }} />}
+                <span className="mb-tag">{chip.text}</span>
+              </span>
+            ))}
           </span>
         </span>
       </button>
@@ -119,62 +145,124 @@ export function ModelPill({ sessionId }: { sessionId?: string } = {}) {
           <ModelPopContent
             runtime={runtime}
             dispatch={dispatch}
-            dynModels={dynModels}
+            dynModels={dyn}
+            commands={commands}
+            onInsertCommand={onInsertCommand}
+            onInjectSkill={() => { setOpen(false); setSkillOpen(true) }}
             onClose={() => setOpen(false)}
           />
         </div>
       )}
+
+      {skillOpen && (
+        <SkillModal
+          initialSelected={[]}
+          onClose={() => setSkillOpen(false)}
+          onDone={(names) => {
+            setSkillOpen(false)
+            if (!projectId || names.length === 0) return
+            api.injectSkills(projectId, names)
+              .then(() => showToast('已注入技能到当前项目'))
+              .catch(() => showToast('注入技能失败'))
+          }}
+        />
+      )}
+
+      {toast && <div className="proj-toast show">{toast}</div>}
     </>
   )
 }
 
-// ── 弹窗内容（移植 renderModelPop L177-208）───────────────────────────────────
+// ── 弹窗内容（渲染切片描述符）─────────────────────────────────────────────────
 
 interface ModelPopContentProps {
-  runtime: ReturnType<typeof useRuntime>['runtime']
-  dispatch: ReturnType<typeof useRuntime>['dispatch']
-  dynModels?: DynModel[] | null
+  runtime: RuntimeState
+  dispatch: React.Dispatch<RuntimeAction>
+  dynModels?: UIModelOption[] | null
+  commands?: SlashCommand[]
+  onInsertCommand?: (name: string) => void
+  onInjectSkill: () => void
   onClose: () => void
 }
 
-function ModelPopContent({ runtime, dispatch, dynModels, onClose }: ModelPopContentProps) {
-  const agent = runtime.agent
-  const efforts = EFFORTS[agent] ?? []
-  const curEffortId = runtime.effort[agent]
-  const curEffort = efforts.find((l) => l.id === curEffortId) ?? efforts[0]
-  // claude 有活动会话的动态模型 → 用 {value,displayName}；否则回落静态展示名列表
-  const dynamic = agent === 'claude' && dynModels && dynModels.length > 0 ? dynModels : null
-  // claude 活动会话用 SDK supportedModels（value/displayName/description，含 1M 变体）；否则回落静态表
-  const modelList: { value: string; label: string; description?: string }[] = dynamic
-    ? dynamic.map((m) => ({ value: m.value, label: m.displayName, description: m.description }))
-    : (CLI_MODELS[agent] ?? [])
-  const groupLabel = (AGENT_LABEL[agent] ?? agent) + (dynamic ? ' · 动态' : '')
+function ModelPopContent({ runtime, dispatch, dynModels, commands, onInsertCommand, onInjectSkill, onClose }: ModelPopContentProps) {
+  const ui = SLICES[runtime.engine].chatUIConfig
+  const slots = slotsOf(runtime)
+  const modeSegments = ui.getModeSelector(slots)
+  const effort = ui.getEffortSection?.(slots) ?? null
+  const modelSection = ui.getModelSection(slots, dynModels)
+  // 命令区只对支持动态模型/命令的切片显示（claude）——slash commands 是 claude SDK 能力，由切片标志门控。
+  const showCommands = !!ui.supportsDynamicModels
+
+  // flyout 受控：null=关；DOMRect=已开（来自折叠行 getBoundingClientRect，供 fixed 定位）
+  const [flyoutRect, setFlyoutRect] = useState<DOMRect | null>(null)
+
+  // 顶部过滤框（对齐 VS Code 命令面板）：query 实时过滤全弹窗项；打开自动聚焦可直接打字
+  const [query, setQuery] = useState('')
+  const inputRef = useRef<HTMLInputElement>(null)
+  useEffect(() => { inputRef.current?.focus() }, [])
+  const q = query.trim().toLowerCase()
+  const hasQuery = q !== ''
+  const match = (s: string) => !hasQuery || s.toLowerCase().includes(q)
+  // Esc 两段式：有内容先清空（拦截，不让外层 document 监听关弹窗）；为空才冒泡到外层关闭
+  const onFilterKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Escape' && query) {
+      e.preventDefault()
+      e.stopPropagation()
+      ;(e.nativeEvent as Event).stopImmediatePropagation?.()
+      setQuery('')
+    }
+  }
+  // 各区过滤结果（query 空 → 全显示）
+  const filteredSegments = modeSegments
+    .map((seg: ModeSegment) => ({ seg, options: seg.options.filter((o) => match(`${o.zh} ${o.en}`)) }))
+    .filter((x) => x.options.length > 0)
+  const effortVisible = !!effort && effort.options.length > 0 && match(`思考强度 effort ${effort.current?.en ?? ''}`)
+  const modelGroupMatch = match(modelSection.groupLabel)
+  const filteredModels = modelGroupMatch
+    ? modelSection.list
+    : modelSection.list.filter((m) => match(`${m.label} ${m.description ?? ''}`))
+  const modelVisible = !hasQuery || filteredModels.length > 0
+  const filteredCommands = (commands ?? []).filter((c) => match(`/${c.name} ${c.description ?? ''}`))
+  const commandsVisible = showCommands && (!hasQuery || filteredCommands.length > 0)
+  const nothingMatched = hasQuery && filteredSegments.length === 0 && !effortVisible && filteredModels.length === 0 && !commandsVisible
 
   const handleClick = (e: React.MouseEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement
 
-    // effort dot（app.js L616）
-    const dot = target.closest('[data-effort]') as HTMLElement | null
-    if (dot) {
-      const effortId = dot.getAttribute('data-effort')!
-      dispatch({ type: 'SET_EFFORT', agent: agent as Engine, effortId })
+    // 命令行 → 把 /name 填进输入框（不直接执行），优先处理避免被其它分支吞掉
+    const cmd = target.closest('[data-cmd]') as HTMLElement | null
+    if (cmd) {
+      onInsertCommand?.(cmd.getAttribute('data-cmd')!)
+      onClose()
       return
     }
 
-    // model-item 或 opt-item（app.js L617-624）
+    // 折叠行 → 开/关 flyout（再点收起）
+    const toggle = target.closest('[data-model-toggle]') as HTMLElement | null
+    if (toggle) {
+      setFlyoutRect((cur) => (cur ? null : toggle.getBoundingClientRect()))
+      return
+    }
+    // pop 内其它任意交互都先收起 flyout（对齐原型 closeFlyout()）
+    if (flyoutRect) setFlyoutRect(null)
+
+    // effort dot
+    const dot = target.closest('[data-effort]') as HTMLElement | null
+    if (dot) {
+      dispatch({ type: 'SET_REASONING', reasoning: dot.getAttribute('data-effort')! })
+      return
+    }
+
+    // mode 段选项（通用：data-mode-slot + data-mode-val）
     const item = target.closest('.model-item, .opt-item') as HTMLElement | null
     if (!item) return
 
-    if (item.hasAttribute('data-cmode')) {
-      dispatch({ type: 'SET_CLAUDE_MODE', claudeMode: item.getAttribute('data-cmode')! as ClaudeMode })
-      return
-    }
-    if (item.hasAttribute('data-capproval')) {
-      dispatch({ type: 'SET_CODEX_APPROVAL', codexApproval: item.getAttribute('data-capproval')! as CodexApproval })
-      return
-    }
-    if (item.hasAttribute('data-csandbox')) {
-      dispatch({ type: 'SET_CODEX_SANDBOX', codexSandbox: item.getAttribute('data-csandbox')! as CodexSandbox })
+    const slot = item.getAttribute('data-mode-slot')
+    if (slot) {
+      const value = item.getAttribute('data-mode-val')!
+      if (slot === 'permissionMode') dispatch({ type: 'SET_PERMISSION_MODE', permissionMode: value })
+      else dispatch({ type: 'SET_MODE_SELECTION', slot, value })
       return
     }
     if (item.hasAttribute('data-model')) {
@@ -185,67 +273,51 @@ function ModelPopContent({ runtime, dispatch, dynModels, onClose }: ModelPopCont
   }
 
   return (
-    <div onClick={handleClick}>
-      {/* claude 权限段（5 档原生 permissionMode，接 SDK 真链路）；codex 审批策略+沙箱段 */}
-      {agent === 'claude' && (
-        <div className="model-group">
-          <div className="model-group-h">权限</div>
-          {CLAUDE_MODES.map((m) => (
+    <div className="model-pop-body" onClick={handleClick}>
+      {/* 顶部过滤框（对齐 VS Code 命令面板）：固定在顶部，不随内容滚动 */}
+      <div className="model-filter">
+        <input
+          ref={inputRef}
+          className="model-filter-input"
+          type="text"
+          placeholder="Filter actions…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={onFilterKeyDown}
+        />
+      </div>
+
+      <div className="model-scroll">
+      {/* 权限/审批/沙箱多段选择器（claude 1 段；codex 2 段）——切片决定段数/标题/选项/写哪个槽 */}
+      {filteredSegments.map(({ seg, options }) => (
+        <div className="model-group model-group-modes" key={seg.key}>
+          <div className="model-group-h">{seg.title}</div>
+          {options.map((o) => (
             <OptRow
-              key={m.id}
-              active={m.id === runtime.claudeMode}
-              dataAttr="data-cmode"
-              dataVal={m.id}
-              zh={m.zh}
-              en={m.en}
+              key={o.id}
+              active={o.id === seg.current}
+              slot={seg.slot}
+              val={o.id}
+              zh={o.zh}
+              en={o.en}
             />
           ))}
         </div>
-      )}
-      {agent === 'codex' && (
-        <>
-          <div className="model-group">
-            <div className="model-group-h">审批策略</div>
-            {CODEX_APPROVAL.map((m) => (
-              <OptRow
-                key={m.id}
-                active={m.id === runtime.codexApproval}
-                dataAttr="data-capproval"
-                dataVal={m.id}
-                zh={m.zh}
-                en={m.en}
-              />
-            ))}
-          </div>
-          <div className="model-group">
-            <div className="model-group-h">沙箱级别</div>
-            {CODEX_SANDBOX.map((m) => (
-              <OptRow
-                key={m.id}
-                active={m.id === runtime.codexSandbox}
-                dataAttr="data-csandbox"
-                dataVal={m.id}
-                zh={m.zh}
-                en={m.en}
-              />
-            ))}
-          </div>
-        </>
-      )}
+      ))}
 
-      {/* Effort 点滑条段 (app.js L192-201) */}
-      {efforts.length > 0 && (
+      {/* Effort 点滑条段 */}
+      {effortVisible && effort && (
         <div className="model-group">
           <div className="effort-row">
             <span className="effort-cap">
-              思考强度<i>Effort · {curEffort?.en}</i>
+              思考强度<i>Effort · {effort.current?.en}</i>
             </span>
             <span className="effort-dots">
-              {efforts.map((l, i) => (
+              {effort.options.map((l, i) => (
                 <button
                   key={l.id}
                   type="button"
-                  className={`effort-dot${l.id === curEffortId ? ' is-active' : ''}${i === efforts.length - 1 ? ' is-extreme' : ''}`}
+                  className={`effort-dot${l.id === effort.current?.id ? ' is-active' : ''}${i === effort.options.length - 1 ? ' is-extreme' : ''}`}
                   data-effort={l.id}
                   title={l.en}
                 />
@@ -255,46 +327,178 @@ function ModelPopContent({ runtime, dispatch, dynModels, onClose }: ModelPopCont
         </div>
       )}
 
-      {/* 模型段 — 对齐 Claude Code 原生 Select a model：displayName 标题 + description 副标题 + 选中打勾高亮 */}
+      {/* 模型段 — 折叠态（claude）：当前项 + 右箭头，点呼出 flyout；平铺态（codex）：列全部。过滤态平铺并过滤，能搜到非当前模型 */}
+      {modelVisible && (
       <div className="model-group">
-        <div className="model-group-h">{groupLabel}</div>
-        {modelList.map((m) => (
+        <div className="model-group-h">{modelSection.groupLabel}</div>
+        {modelSection.collapsed && !hasQuery ? (
           <button
-            key={m.value}
             type="button"
-            className={`model-item${m.description ? ' model-item-2l' : ''}${m.value === runtime.model ? ' is-active' : ''}`}
-            data-model={m.value}
+            className="model-item model-item-2l model-collapsed"
+            data-model-toggle
+            aria-label="选择模型"
           >
             <span className="mi-text">
-              <span className="mi-title">{m.label}</span>
-              {m.description && <span className="mi-desc">{m.description}</span>}
+              <span className="mi-title">{modelSection.current?.label}</span>
+              {modelSection.current?.description && <span className="mi-desc">{modelSection.current.description}</span>}
             </span>
-            <span className="mk">✓</span>
+            <span className="mi-caret">{CARET_SVG}</span>
           </button>
-        ))}
+        ) : (
+          (hasQuery ? filteredModels : modelSection.list).map((m) => (
+            <button
+              key={m.value}
+              type="button"
+              className={`model-item${m.description ? ' model-item-2l' : ''}${m.value === runtime.model ? ' is-active' : ''}`}
+              data-model={m.value}
+            >
+              <span className="mi-text">
+                <span className="mi-title">{m.label}</span>
+                {m.description && <span className="mi-desc">{m.description}</span>}
+              </span>
+              <span className="mk">✓</span>
+            </button>
+          ))
+        )}
+      </div>
+      )}
+
+      {modelSection.collapsed && flyoutRect && !hasQuery && (
+        <ModelFlyout
+          rect={flyoutRect}
+          models={modelSection.list}
+          current={runtime.model}
+          onPick={(value) => {
+            dispatch({ type: 'SET_MODEL', model: value })
+            setFlyoutRect(null)
+            onClose()
+          }}
+          onOutside={() => setFlyoutRect(null)}
+        />
+      )}
+
+      {/* Slash Commands 命令区（claude 专属，由 supportsDynamicModels 门控）：
+          点行把 /name 填进输入框（不直接执行）。标题行带「注入技能」入口（P3）：点它对当前项目软链技能。 */}
+      {commandsVisible && (
+        <div className="model-group">
+          <div className="model-group-h model-group-h-row">
+            Slash Commands
+            <button
+              className="mg-inject"
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onInjectSkill() }}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+              注入技能
+            </button>
+          </div>
+          {filteredCommands.map((c) => (
+            <button key={c.name} type="button" className="model-item cmd-item" data-cmd={c.name}>
+              <span className="ci-text">
+                <span className="ci-name">/{c.name}</span>
+                <span className="ci-desc">{c.description}</span>
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {nothingMatched && <div className="model-empty">无匹配项</div>}
       </div>
     </div>
   )
 }
 
-// ── OptRow（移植 optRow 函数）────────────────────────────────────────────────
+// ── ModelFlyout（折叠行右侧呼出的模型列表；fixed 附 body，不被 .model-pop overflow 裁切）──────
+
+interface ModelFlyoutProps {
+  rect: DOMRect
+  models: UIModelOption[]
+  current: string
+  onPick: (value: string) => void
+  onOutside: () => void
+}
+
+function ModelFlyout({ rect, models, current, onPick, onOutside }: ModelFlyoutProps) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null)
+
+  // 渲染后量自身尺寸再定位：锚点右侧；放不下翻左；竖直对齐锚点顶端并夹在视口内
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const fw = el.offsetWidth
+    const fh = el.offsetHeight
+    let left = rect.right + 6
+    if (left + fw > window.innerWidth - 8) left = Math.max(8, rect.left - fw - 6)
+    let top = Math.min(rect.top, window.innerHeight - 8 - fh)
+    if (top < 8) top = 8
+    setPos({ left, top })
+  }, [rect])
+
+  // 点 flyout 外部 → 关（对齐原型 flyoutOutside；下一 tick 注册避开本次开 flyout 的 click）
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) onOutside()
+    }
+    const t = setTimeout(() => document.addEventListener('click', handler), 0)
+    return () => {
+      clearTimeout(t)
+      document.removeEventListener('click', handler)
+    }
+  }, [onOutside])
+
+  return createPortal(
+    <div
+      ref={ref}
+      className="model-flyout"
+      style={{ left: pos?.left ?? rect.right + 6, top: pos?.top ?? rect.top, visibility: pos ? 'visible' : 'hidden' }}
+      onClick={(e) => {
+        e.stopPropagation()
+        const item = (e.target as HTMLElement).closest('[data-model]') as HTMLElement | null
+        if (!item) return
+        onPick(item.getAttribute('data-model')!)
+      }}
+    >
+      {models.map((m) => (
+        <button
+          key={m.value}
+          type="button"
+          className={`model-item model-item-2l${m.value === current ? ' is-active' : ''}`}
+          data-model={m.value}
+        >
+          <span className="mi-text">
+            <span className="mi-title">{m.label}</span>
+            {m.description && <span className="mi-desc">{m.description}</span>}
+          </span>
+          <span className="mk">✓</span>
+        </button>
+      ))}
+    </div>,
+    document.body,
+  )
+}
+
+// ── OptRow（mode 段选项行；通用 data-mode-slot/data-mode-val）─────────────────
 
 interface OptRowProps {
   active: boolean
-  dataAttr: string
-  dataVal: string
+  slot: string
+  val: string
   zh: string
   en: string
 }
 
-function OptRow({ active, dataAttr, dataVal, zh, en }: OptRowProps) {
+function OptRow({ active, slot, val, zh, en }: OptRowProps) {
   // 用 button 而非 div，便于 userEvent.click
-  const attrs: Record<string, string> = { [dataAttr]: dataVal }
   return (
     <button
       type="button"
       className={`model-item opt-item${active ? ' is-active' : ''}`}
-      {...attrs}
+      data-mode-slot={slot}
+      data-mode-val={val}
     >
       <span className="opt-t"><b>{zh}</b><i>{en}</i></span>
       <span className="mk">✓</span>

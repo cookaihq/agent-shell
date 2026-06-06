@@ -12,14 +12,13 @@ vi.mock('../../api/client', () => ({
   },
 }))
 
-test('渲染三导航 + 默认执行模式 + 切到技能 + 关闭', async () => {
+test('渲染两导航（执行模式/系统设置）+ 默认执行模式 + 关闭', async () => {
   const onClose = vi.fn()
   render(<Settings section="exec" onClose={onClose} />)
   expect(screen.getByRole('button', { name: '执行模式' })).toBeInTheDocument()
   expect(screen.getByRole('button', { name: '系统设置' })).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: '技能' })).not.toBeInTheDocument()
   expect(screen.getByRole('heading', { name: '执行模式' })).toBeInTheDocument()
-  await userEvent.click(screen.getByRole('button', { name: '技能' }))
-  expect(await screen.findByRole('heading', { name: '技能' })).toBeInTheDocument()
   await userEvent.keyboard('{Escape}')
   expect(onClose).toHaveBeenCalled()
 })

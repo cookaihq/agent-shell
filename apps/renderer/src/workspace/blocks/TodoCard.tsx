@@ -22,13 +22,11 @@ const todoCheck = (status: string): string => {
 export function TodoCard({ todos }: TodoCardProps) {
   const doneCount = todos.filter((t) => t.status === 'completed').length
   const total = todos.length
-
   return (
-    <div className="op-card">
-      <div className="op-head">
-        <span className="op-icon todo">✓</span>
-        <span className="op-title">任务计划</span>
-        <span className="op-status running">进行中 {doneCount}/{total}</span>
+    <div className="op-row">
+      <div className="op-line">
+        <span className="opl-name">任务计划</span>
+        <span className="opl-desc">{doneCount}/{total} 完成</span>
       </div>
       <ul className="todo-list">
         {todos.map((todo, i) => (

@@ -25,3 +25,12 @@ export function defaultSkillsDir(): string {
 export function configPath(): string {
   return path.join(channelDataDir(), 'config.json')
 }
+
+/** 源清单文件（0600）。随渠道隔离。 */
+export function skillSourcesPath(): string { return path.join(channelDataDir(), 'skill-sources.json') }
+/** Git 源 clone 缓存根目录。随渠道隔离。 */
+export function skillSrcCacheDir(): string { return path.join(channelDataDir(), 'skill-src-cache') }
+/** 库清单（溯源 + 重名映射）。挂库目录下。 */
+export function libraryManifestPath(skillsDir: string): string { return path.join(skillsDir, '.library.json') }
+/** 命令行工具清单（已加入的推荐 + 自定义，0600）。随渠道隔离。 */
+export function cliToolsPath(): string { return path.join(channelDataDir(), 'cli-tools.json') }

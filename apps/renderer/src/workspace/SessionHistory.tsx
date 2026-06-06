@@ -21,7 +21,23 @@
  */
 
 import { useState } from 'react'
-import type { SessionDTO } from '../api/types'
+import type { SessionDTO, AutomationRunStatus } from '../api/types'
+
+const IconClock = () => (
+  <svg className="hi-clock" width={11} height={11} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="12" cy="12" r="9" /><path d="M12 7.5v4.8l3 1.8" />
+  </svg>
+)
+
+// 自动化产出会话的状态徽标：来自该次 run 状态（needs-review→待复核 紫），区别于会话自身 status。
+const AUTO_WHEN: Record<AutomationRunStatus, { cls: string; text: string }> = {
+  queued: { cls: '', text: '排队中' },
+  running: { cls: 'run', text: '运行中' },
+  succeeded: { cls: '', text: '已完成' },
+  failed: { cls: 'fail', text: '失败' },
+  'needs-review': { cls: 'review', text: '待复核' },
+  canceled: { cls: 'abort', text: '已取消' },
+}
 
 // ── SVG 图标（inline，1:1 from workspace.html hi-actions）─────────────────────
 
@@ -74,12 +90,16 @@ function HistItem({ session, isActive, activeRunning, onSelect, onResume, onPin,
   const [draft, setDraft] = useState('')
   const [doneRef] = useState({ current: false })
 
-  // 状态计算（五态，去「等待确认」）
+  const isAuto = session.origin === 'automation'
+  // 状态计算（五态，去「等待确认」）；自动化产出会话改用该次 run 状态（needs-review 紫「待复核」）。
   let whenCls = ''
   let whenText = ''
   if (isActive && activeRunning) {
     whenCls = 'run'
     whenText = '运行中'
+  } else if (isAuto && session.automationRunStatus) {
+    const w = AUTO_WHEN[session.automationRunStatus]
+    whenCls = w.cls; whenText = w.text
   } else {
     switch (session.status) {
       case 'completed': whenCls = '';      whenText = '已完成'; break
@@ -133,7 +153,7 @@ function HistItem({ session, isActive, activeRunning, onSelect, onResume, onPin,
 
   return (
     <div
-      className={`hist-item${isActive ? ' is-active' : ''}${session.pinned ? ' is-pinned' : ''}`}
+      className={`hist-item${isActive ? ' is-active' : ''}${session.pinned ? ' is-pinned' : ''}${isAuto ? ' is-auto' : ''}`}
     >
       <span className={`hi-dot ${session.engine}`} />
 
@@ -152,9 +172,14 @@ function HistItem({ session, isActive, activeRunning, onSelect, onResume, onPin,
             onClick={(e) => e.stopPropagation()}
           />
         ) : (
-          <span className="hi-title" onClick={() => onSelect(session.id)}>
-            {session.title}
-          </span>
+          <>
+            <span className="hi-title" onClick={() => onSelect(session.id)}>
+              {session.title}
+            </span>
+            {isAuto && session.scheduleSummary && (
+              <span className="hi-sub"><IconClock />{session.scheduleSummary}</span>
+            )}
+          </>
         )}
       </span>
 
@@ -229,11 +254,17 @@ export function SessionHistory({
   onDelete,
 }: SessionHistoryProps) {
   const [query, setQuery] = useState('')
+  const [tab, setTab] = useState<'manual' | 'auto'>('manual')
 
-  // 前端过滤（搜索标题）
+  // 按来源分桶（§6.3）：origin==='automation' 进自动化 tab，其余（含 legacy undefined）进普通会话
+  const manualSessions = sessions.filter((s) => s.origin !== 'automation')
+  const autoSessions = sessions.filter((s) => s.origin === 'automation')
+  const tabSessions = tab === 'auto' ? autoSessions : manualSessions
+
+  // 前端过滤（搜索标题）——只过滤当前 tab
   const filtered = query.trim()
-    ? sessions.filter((s) => s.title.includes(query.trim()))
-    : sessions
+    ? tabSessions.filter((s) => s.title.includes(query.trim()))
+    : tabSessions
 
     // .menu 基类是 display:none，靠 .open 显示（原型 wirePopover 范式）；React 这里条件挂载即「已打开」，必须带 open
   return (
@@ -251,10 +282,20 @@ export function SessionHistory({
         />
       </div>
 
+      {/* 来源分 tab（§6.3）：普通会话 / 自动化，各带计数；列表只显示当前 tab */}
+      <div className="hist-tabs">
+        <button className={`htab${tab === 'manual' ? ' is-active' : ''}`} type="button" onClick={() => setTab('manual')}>
+          普通会话 <span className="hs-count">{manualSessions.length}</span>
+        </button>
+        <button className={`htab${tab === 'auto' ? ' is-active' : ''}`} type="button" onClick={() => setTab('auto')}>
+          自动化 <span className="hs-count">{autoSessions.length}</span>
+        </button>
+      </div>
+
       {/* 会话列表（L35-44）*/}
       <div className="hist-scroll">
         {filtered.length === 0 ? (
-          <div className="hist-empty">{query.trim() ? '没有匹配的会话' : '暂无会话'}</div>
+          <div className="hist-empty">{query.trim() ? '没有匹配的会话' : tab === 'auto' ? '暂无自动化产出的会话' : '暂无会话'}</div>
         ) : filtered.map((s) => (
           <HistItem
             key={s.id}

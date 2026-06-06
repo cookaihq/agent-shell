@@ -17,12 +17,16 @@ export interface BuildArgsOpts {
 export interface AuthStrategy {
   apiKeyEnv: string
   baseUrlEnv: string
+  /** 备用凭证变量（claude=ANTHROPIC_AUTH_TOKEN）。存在则默认一并剥除，并可作为 keyEnv 注入目标。 */
+  altKeyEnv?: string
 }
 
 /** BYOK / Provider 凭证（V1 不接 UI，但函数前向就绪）。 */
 export interface ProviderCreds {
   baseUrl?: string
   apiKey?: string
+  /** key 注入到哪个变量：api_key→apiKeyEnv，auth_token→altKeyEnv。省略=api_key。 */
+  keyEnv?: 'api_key' | 'auth_token'
 }
 
 /** 声明式引擎适配（MVP §2.2）。加引擎 = 加一个实现本接口的 def。 */

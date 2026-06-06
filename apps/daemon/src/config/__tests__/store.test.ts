@@ -32,4 +32,9 @@ describe('config store', () => {
     store.write({ debugMode: true })
     expect(store.read().debugMode).toBe(true)
   })
+  it('engineModels 写入后可回读', () => {
+    const store = makeConfigStore(file, { projectsDir: '/p', skillsDir: '/s' })
+    store.write({ engineModels: { claude: 'claude-opus-4-5' } })
+    expect(store.read().engineModels).toEqual({ claude: 'claude-opus-4-5' })
+  })
 })

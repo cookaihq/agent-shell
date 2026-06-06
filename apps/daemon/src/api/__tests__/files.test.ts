@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest'
 import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path'
-import { scanTree, readProjectFile, resolveProjectFile, importFiles, saveAttachmentBytes, FileAccessError } from '../files'
+import { scanTree, readProjectFile, resolveProjectFile, resolveProjectPath, renameEntry, moveEntry, importFiles, saveAttachmentBytes, FileAccessError } from '../files'
 
 let tmp = ''
 afterEach(() => { if (tmp) fs.rmSync(tmp, { recursive: true, force: true }); tmp = '' })
@@ -155,5 +155,97 @@ describe('saveAttachmentBytes（粘贴字节写盘）', () => {
     expect(out.name).toBe('x (1).png')
     expect(out.path).toBe('attachments/x (1).png')
     expect(fs.readFileSync(path.join(root, 'attachments', 'x.png'), 'utf8')).toBe('OLD')
+  })
+})
+
+describe('resolveProjectPath（放宽：目录也放行）', () => {
+  it('文件 / 目录都返回绝对路径', () => {
+    const r = fixture()
+    expect(resolveProjectPath(r, 'README.md')).toBe(path.join(path.resolve(r), 'README.md'))
+    expect(resolveProjectPath(r, 'src')).toBe(path.join(path.resolve(r), 'src'))   // 目录不再抛 not_a_file
+  })
+  it('越界 / 不存在仍抛', () => {
+    const r = fixture()
+    try { resolveProjectPath(r, '../x'); expect.unreachable() } catch (e) { expect((e as FileAccessError).reason).toBe('out_of_bounds') }
+    try { resolveProjectPath(r, 'nope'); expect.unreachable() } catch (e) { expect((e as FileAccessError).reason).toBe('not_found') }
+  })
+})
+
+describe('renameEntry', () => {
+  it('文件同目录改名，返回新相对路径', () => {
+    const r = fixture()
+    expect(renameEntry(r, 'src/a.ts', 'b.ts')).toBe('src/b.ts')
+    expect(fs.existsSync(path.join(r, 'src', 'b.ts'))).toBe(true)
+    expect(fs.existsSync(path.join(r, 'src', 'a.ts'))).toBe(false)
+  })
+  it('目录也能改名', () => {
+    const r = fixture()
+    expect(renameEntry(r, 'src', 'lib')).toBe('lib')
+    expect(fs.existsSync(path.join(r, 'lib', 'a.ts'))).toBe(true)
+  })
+  it('含路径分隔符 / . / .. 拒绝（invalid_name）', () => {
+    const r = fixture()
+    for (const bad of ['a/b.ts', 'a\\b.ts', '.', '..', '']) {
+      try { renameEntry(r, 'README.md', bad); expect.unreachable() } catch (e) { expect((e as FileAccessError).reason).toBe('invalid_name') }
+    }
+  })
+  it('目标重名拒绝（already_exists）', () => {
+    const r = fixture()
+    fs.writeFileSync(path.join(r, 'src', 'c.ts'), 'c')
+    try { renameEntry(r, 'src/a.ts', 'c.ts'); expect.unreachable() } catch (e) { expect((e as FileAccessError).reason).toBe('already_exists') }
+  })
+  it('越界 / 源不存在 / 改根 拒绝', () => {
+    const r = fixture()
+    try { renameEntry(r, '../x', 'y'); expect.unreachable() } catch (e) { expect((e as FileAccessError).reason).toBe('out_of_bounds') }
+    try { renameEntry(r, '', 'y'); expect.unreachable() } catch (e) { expect((e as FileAccessError).reason).toBe('out_of_bounds') }
+    try { renameEntry(r, 'nope', 'y'); expect.unreachable() } catch (e) { expect((e as FileAccessError).reason).toBe('not_found') }
+  })
+})
+
+describe('moveEntry', () => {
+  it('把文件移进子目录，返回新旧相对路径', () => {
+    const r = fixture()
+    const moved = moveEntry(r, ['README.md'], 'src')
+    expect(moved).toEqual([{ from: 'README.md', to: 'src/README.md' }])
+    expect(fs.existsSync(path.join(r, 'src', 'README.md'))).toBe(true)
+    expect(fs.existsSync(path.join(r, 'README.md'))).toBe(false)
+  })
+  it('移到项目根（destDir=\'\'）', () => {
+    const r = fixture()
+    fs.mkdirSync(path.join(r, 'sub')); fs.writeFileSync(path.join(r, 'sub', 'd.txt'), 'd')
+    const moved = moveEntry(r, ['sub/d.txt'], '')
+    expect(moved).toEqual([{ from: 'sub/d.txt', to: 'd.txt' }])
+    expect(fs.existsSync(path.join(r, 'd.txt'))).toBe(true)
+  })
+  it('同名冲突去重不覆盖', () => {
+    const r = fixture()
+    fs.writeFileSync(path.join(r, 'src', 'README.md'), 'EXISTING')
+    const moved = moveEntry(r, ['README.md'], 'src')
+    expect(moved[0].to).toBe('src/README (1).md')
+    expect(fs.readFileSync(path.join(r, 'src', 'README.md'), 'utf8')).toBe('EXISTING')   // 原文件不动
+    expect(fs.readFileSync(path.join(r, 'src', 'README (1).md'), 'utf8')).toBe('# hi')    // 副本加后缀
+  })
+  it('已在目标目录中（同父）→ no-op 跳过', () => {
+    const r = fixture()
+    expect(moveEntry(r, ['src/a.ts'], 'src')).toEqual([])   // a.ts 已在 src 下
+    expect(fs.existsSync(path.join(r, 'src', 'a.ts'))).toBe(true)
+  })
+  it('把目录移进自身 / 子孙 → 拒绝（invalid_move）', () => {
+    const r = fixture()
+    fs.mkdirSync(path.join(r, 'src', 'deep'))
+    try { moveEntry(r, ['src'], 'src'); expect.unreachable() } catch (e) { expect((e as FileAccessError).reason).toBe('invalid_move') }
+    try { moveEntry(r, ['src'], 'src/deep'); expect.unreachable() } catch (e) { expect((e as FileAccessError).reason).toBe('invalid_move') }
+  })
+  it('目标不是目录 → 拒绝（invalid_move）', () => {
+    const r = fixture()
+    try { moveEntry(r, ['src/a.ts'], 'README.md'); expect.unreachable() } catch (e) { expect((e as FileAccessError).reason).toBe('invalid_move') }
+  })
+  it('目标目录不存在 → not_found', () => {
+    const r = fixture()
+    try { moveEntry(r, ['README.md'], 'ghost'); expect.unreachable() } catch (e) { expect((e as FileAccessError).reason).toBe('not_found') }
+  })
+  it('越界 / 不存在的源静默跳过', () => {
+    const r = fixture()
+    expect(moveEntry(r, ['../escape', 'nope.txt'], 'src')).toEqual([])
   })
 })

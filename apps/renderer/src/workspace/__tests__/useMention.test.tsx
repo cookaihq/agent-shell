@@ -19,7 +19,7 @@ function makeTA(value: string, cursor?: number): HTMLTextAreaElement {
 describe('useMention — detect', () => {
   it('行首 @ 触发 trig=@ query=空（有文件候选）', () => {
     // 需要至少一个文件候选才能打开菜单；无候选时正确行为是不显示
-    const { result } = renderHook(() => useMention(['README.md', 'src/index.ts'], []))
+    const { result } = renderHook(() => useMention(['README.md', 'src/index.ts'], [], []))
     const ta = makeTA('@')
     act(() => { result.current.onInput(ta) })
     expect(result.current.open).toBe(true)
@@ -29,7 +29,7 @@ describe('useMention — detect', () => {
 
   it('@re 过滤文件名含 re', () => {
     const files = ['README.md', 'src/index.ts', 'readme.txt']
-    const { result } = renderHook(() => useMention(files, []))
+    const { result } = renderHook(() => useMention(files, [], []))
     const ta = makeTA('@re')
     act(() => { result.current.onInput(ta) })
     expect(result.current.open).toBe(true)
@@ -40,7 +40,7 @@ describe('useMention — detect', () => {
   })
 
   it('空格后 @ 也能触发', () => {
-    const { result } = renderHook(() => useMention(['foo.ts'], []))
+    const { result } = renderHook(() => useMention(['foo.ts'], [], []))
     const ta = makeTA('hello @foo')
     act(() => { result.current.onInput(ta) })
     expect(result.current.open).toBe(true)
@@ -49,7 +49,8 @@ describe('useMention — detect', () => {
   })
 
   it('/ 触发命令候选', () => {
-    const { result } = renderHook(() => useMention([], []))
+    const cmds = [{ name: 'clear', desc: '清空当前会话' }]
+    const { result } = renderHook(() => useMention([], [], cmds))
     const ta = makeTA('/cl')
     act(() => { result.current.onInput(ta) })
     expect(result.current.open).toBe(true)
@@ -60,7 +61,7 @@ describe('useMention — detect', () => {
 
   it('@decks/ 含斜杠路径前缀仍能筛选该目录下文件（对齐原型，query 允许含 /）', () => {
     const files = ['decks/seed/slide-01.html', 'decks/seed/styles.css', 'src/index.ts']
-    const { result } = renderHook(() => useMention(files, []))
+    const { result } = renderHook(() => useMention(files, [], []))
     const ta = makeTA('@decks/seed/')
     act(() => { result.current.onInput(ta) })
     expect(result.current.open).toBe(true)
@@ -72,21 +73,21 @@ describe('useMention — detect', () => {
   })
 
   it('http:// 里的 / 前是字母，不被当触发符', () => {
-    const { result } = renderHook(() => useMention(['foo.ts'], []))
+    const { result } = renderHook(() => useMention(['foo.ts'], [], []))
     const ta = makeTA('see http://')
     act(() => { result.current.onInput(ta) })
     expect(result.current.open).toBe(false)
   })
 
   it('普通文字不触发', () => {
-    const { result } = renderHook(() => useMention([], []))
+    const { result } = renderHook(() => useMention([], [], []))
     const ta = makeTA('hello world')
     act(() => { result.current.onInput(ta) })
     expect(result.current.open).toBe(false)
   })
 
   it('无匹配候选时关闭', () => {
-    const { result } = renderHook(() => useMention(['foo.ts'], []))
+    const { result } = renderHook(() => useMention(['foo.ts'], [], []))
     const ta = makeTA('@zzznomatch')
     act(() => { result.current.onInput(ta) })
     expect(result.current.open).toBe(false)
@@ -96,7 +97,7 @@ describe('useMention — detect', () => {
 describe('useMention — keyboard nav', () => {
   it('ArrowDown 移到下一项，ArrowUp 回上一项', () => {
     const files = ['a.ts', 'b.ts', 'c.ts']
-    const { result } = renderHook(() => useMention(files, []))
+    const { result } = renderHook(() => useMention(files, [], []))
     // open menu
     act(() => { result.current.onInput(makeTA('@')) })
     expect(result.current.activeIndex).toBe(0)
@@ -113,7 +114,7 @@ describe('useMention — keyboard nav', () => {
   })
 
   it('ArrowUp 在 index=0 时循环到末尾', () => {
-    const { result } = renderHook(() => useMention(['a.ts', 'b.ts'], []))
+    const { result } = renderHook(() => useMention(['a.ts', 'b.ts'], [], []))
     act(() => { result.current.onInput(makeTA('@')) })
     expect(result.current.activeIndex).toBe(0)
     act(() => {
@@ -124,7 +125,7 @@ describe('useMention — keyboard nav', () => {
   })
 
   it('Esc 关闭菜单', () => {
-    const { result } = renderHook(() => useMention(['x.ts'], []))
+    const { result } = renderHook(() => useMention(['x.ts'], [], []))
     act(() => { result.current.onInput(makeTA('@')) })
     expect(result.current.open).toBe(true)
     act(() => {
@@ -137,7 +138,7 @@ describe('useMention — keyboard nav', () => {
 
 describe('useMention — choose', () => {
   it('Enter 选中 → 插入文本 + 关闭', () => {
-    const { result } = renderHook(() => useMention(['README.md'], []))
+    const { result } = renderHook(() => useMention(['README.md'], [], []))
     const ta = makeTA('@re')
     act(() => { result.current.onInput(ta) })
     expect(result.current.open).toBe(true)
@@ -151,7 +152,8 @@ describe('useMention — choose', () => {
   })
 
   it('/ 命令选中 → 插入 /clear', () => {
-    const { result } = renderHook(() => useMention([], []))
+    const cmds = [{ name: 'clear', desc: '清空当前会话' }]
+    const { result } = renderHook(() => useMention([], [], cmds))
     const ta = makeTA('/cl')
     act(() => { result.current.onInput(ta) })
 

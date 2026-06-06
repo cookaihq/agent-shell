@@ -4,10 +4,10 @@ import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path'
 import { openDatabase } from '../../db/database'
 import { createProject } from '../../db/projects'
 import { createSession, getSession } from '../../db/sessions'
-import { getMessages } from '../../db/messages'
 import { getUsage } from '../../db/usage'
 import { readRecords } from '../transcript'
 import { SessionRuntime } from '../sessionRuntime'
+import type { RunState } from '../sessionRuntime'
 import type { AgentEvent } from '@agent-shell/contracts'
 
 function fakeChild() {
@@ -26,11 +26,11 @@ const flush = async (n = 4) => { for (let i = 0; i < n; i++) await new Promise((
 function fakeClaudeQuery() {
   const instances: any[] = []
   const queryFn = (args: any) => {
-    const inst: any = { options: args.options, received: [] as string[], emitQ: [] as any[], waiting: null as any, inputEnded: false, genDone: false, interrupts: 0, setPermissionMode: [] as string[], applyFlagSettings: [] as any[], setModel: [] as string[] }
+    const inst: any = { options: args.options, received: [] as string[], contents: [] as any[], emitQ: [] as any[], waiting: null as any, inputEnded: false, genDone: false, interrupts: 0, setPermissionMode: [] as string[], applyFlagSettings: [] as any[], setModel: [] as string[] }
     instances.push(inst)
     const maybeComplete = () => { if (inst.inputEnded && inst.emitQ.length === 0 && inst.waiting) { const w = inst.waiting; inst.waiting = null; inst.genDone = true; w({ done: true, value: undefined }) } }
     inst.maybeComplete = maybeComplete
-    ;(async () => { for await (const m of args.prompt) { const t = m?.message?.content?.[0]?.text; if (typeof t === 'string') inst.received.push(t) } inst.inputEnded = true; maybeComplete() })()
+    ;(async () => { for await (const m of args.prompt) { const content = m?.message?.content; inst.contents.push(content); const t = Array.isArray(content) ? content.find((b: any) => b?.type === 'text')?.text : undefined; if (typeof t === 'string') inst.received.push(t) } inst.inputEnded = true; maybeComplete() })()
     const iterator = {
       next: () => {
         if (inst.emitQ.length) return Promise.resolve({ done: false, value: inst.emitQ.shift() })
@@ -44,7 +44,7 @@ function fakeClaudeQuery() {
       interrupt: async () => { inst.interrupts++; inst.inputEnded = true; inst.genDone = true; if (inst.waiting) { const w = inst.waiting; inst.waiting = null; w({ done: true, value: undefined }) } },
       setPermissionMode: async (m: string) => { inst.setPermissionMode.push(m) },
       setModel: async (m: string) => { inst.setModel.push(m) }, applyFlagSettings: async (s: any) => { inst.applyFlagSettings.push(s) },
-      supportedModels: async () => [], rewindFiles: async () => ({ canRewind: true }),
+      supportedModels: async () => [], supportedCommands: async () => [{ name: 'plan', description: '进入计划模式', argumentHint: '' }], rewindFiles: async () => ({ canRewind: true }),
     }
     return inst.q
   }
@@ -52,16 +52,38 @@ function fakeClaudeQuery() {
   return { queryFn, instances, current: () => instances.at(-1), emit }
 }
 
-function setup(engine: 'claude' | 'codex' = 'codex', opts: { transcriptDir?: string } = {}) {
+/** 默认探针结果：与活会话/会话桶的 'plan'/'review' 区分开，便于断言「四态回落到 cwd 探针」而非串到 live 缓存。 */
+const PROBE_CMDS = [{ name: 'probed', description: 'cwd 探针命令', argumentHint: '' }]
+
+function setup(
+  engine: 'claude' | 'codex' = 'codex',
+  opts: { transcriptDir?: string; probeResult?: any[]; probeCommandsFn?: any } = {},
+) {
   const db = openDatabase(':memory:')
   const proj = createProject(db, { name: 'p', path: '/work' })
   const sess = createSession(db, { projectId: proj.id, engine, model: engine === 'claude' ? 'opus' : 'gpt-5' })
   const children: any[] = []
   const spawnFn = (() => { const cp = fakeChild(); children.push(cp); return cp }) as any
   const claude = fakeClaudeQuery()
-  const rt = new SessionRuntime({ db, resolveBin: () => '/abs/bin', spawnFn, claudeQueryFn: claude.queryFn as any, transcriptDir: opts.transcriptDir })
-  return { db, proj, sess, rt, children, claude }
+  // 假命令探针：记录每次调用的 cwd/addDirs（验证去重/指纹），默认返回 PROBE_CMDS（与 live 缓存区分）
+  const probeCalls: Array<{ cwd: string; addDirs?: string[] }> = []
+  const probeCommandsFn = opts.probeCommandsFn ?? (async (o: { cwd: string; addDirs?: string[] }) => { probeCalls.push(o); return opts.probeResult ?? PROBE_CMDS })
+  const rt = new SessionRuntime({ db, resolveBin: () => '/abs/bin', spawnFn, claudeQueryFn: claude.queryFn as any, probeCommandsFn, transcriptDir: opts.transcriptDir })
+  return { db, proj, sess, rt, children, claude, probeCalls }
 }
+
+describe('RunState 判别式联合：非法态不可表达（类型级守卫）', () => {
+  it('codex 运行态访问 claude 专属档位 → 编译期报错（@ts-expect-error 守住）', () => {
+    const codexRun: Extract<RunState, { kind: 'codex' }> = { kind: 'codex' }
+    // @ts-expect-error codex 运行态无 permissionMode（claude 专属，不可表达）
+    void codexRun.permissionMode
+    // @ts-expect-error codex 运行态无 queryAlive（claude 专属，不可表达）
+    void codexRun.queryAlive
+    // @ts-expect-error codex 运行态无 effort（claude 专属，不可表达）
+    void codexRun.effort
+    expect(codexRun.kind).toBe('codex')
+  })
+})
 
 describe('SessionRuntime 单轮闭环', () => {
   it('codex submit：起进程→事件 fan-out→turn_end 落库（assistant message + usage + status completed + turn=1）', async () => {
@@ -78,11 +100,8 @@ describe('SessionRuntime 单轮闭环', () => {
     cp.emit('close', 0, null)
     await new Promise((r) => setImmediate(r))   // 等 done 微任务跑完
 
-    // 订阅者收到 message/usage/turn_end
-    expect(seen.map((e) => e.type)).toEqual(['message', 'usage', 'turn_end'])
-    // messages 表不再写入 user/assistant（已改写 transcript）
-    const msgs = getMessages(db, sess.id)
-    expect(msgs).toHaveLength(0)
+    // 订阅者收到 turn_start（running 入口）→ message/usage/turn_end
+    expect(seen.map((e) => e.type)).toEqual(['turn_start', 'message', 'usage', 'turn_end'])
     // usage turn=1
     expect(getUsage(db, sess.id)).toMatchObject([{ turn: 1, inputTokens: 5, outputTokens: 7 }])
     // status completed + resumable_id 落库
@@ -90,15 +109,13 @@ describe('SessionRuntime 单轮闭环', () => {
     expect(rt.isRunning(sess.id)).toBe(false)
   })
 
-  it('codex submit：user 消息在 submit 时立即写入 transcript（不再写 messages 表）', () => {
+  it('codex submit：user 消息在 submit 时立即写入 transcript', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-rt-'))
     try {
-      const { db, sess, rt } = setup('codex', { transcriptDir: dir })
+      const { sess, rt } = setup('codex', { transcriptDir: dir })
       rt.submit(sess.id, '先记一笔')
       // transcript 立即有 user_prompt 记录
       expect(readRecords(dir, sess.id)[0]).toMatchObject({ type: 'user_prompt', raw: { text: '先记一笔' } })
-      // messages 表无写入
-      expect(getMessages(db, sess.id)).toHaveLength(0)
     } finally { fs.rmSync(dir, { recursive: true, force: true }) }
   })
 
@@ -111,6 +128,28 @@ describe('SessionRuntime 单轮闭环', () => {
     await new Promise((r) => setImmediate(r))
     expect(getSession(db, sess.id)).toMatchObject({ status: 'failed' })
     expect(getUsage(db, sess.id)).toEqual([])
+  })
+
+  it('claude 流式文本：onTurnEnd 落库前折叠堆叠的流式块（重载===实时，不重复）', async () => {
+    const trDir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-rt-'))
+    try {
+      const { sess, rt, claude } = setup('claude', { transcriptDir: trDir })
+      rt.subscribe(sess.id, () => {})
+      rt.submit(sess.id, 'hi')
+      await flush()
+      // 模拟 SDK 流式：start → 多个 text_delta（产生多帧 message(streaming:true)）→ stop（定格 message(streaming:false)）
+      claude.emit({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'text' } } })
+      claude.emit({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'I will' } } })
+      claude.emit({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: ' start now' } } })
+      claude.emit({ type: 'stream_event', event: { type: 'content_block_stop', index: 0 } })
+      claude.emit({ type: 'result', stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 } })
+      await flush()
+      // 重载源 = 落库的 assistant_blocks：流式堆叠的多块应被折叠成 1 块，不再「重复」
+      const ab = readRecords(trDir, sess.id).find((r) => r.type === 'assistant_blocks')
+      const texts = ((ab?.raw as any).blocks as any[]).filter((b) => b.type === 'text')
+      expect(texts).toHaveLength(1)
+      expect(texts[0].text).toBe('I will start now')
+    } finally { fs.rmSync(trDir, { recursive: true, force: true }) }
   })
 })
 
@@ -141,6 +180,19 @@ describe('SessionRuntime 续投队列', () => {
     expect(claude.instances.length).toBe(1)
     expect(claude.current().received).toEqual(['q1', 'q2'])
     expect(rt.isRunning(sess.id)).toBe(true)
+  })
+
+  it('claude 续投：每个新轮都发 turn_start（startTurn 首轮 + queryAlive 续投轮）', async () => {
+    const { sess, rt, claude } = setup('claude')
+    const seen: AgentEvent[] = []
+    rt.subscribe(sess.id, (e) => seen.push(e))
+    rt.submit(sess.id, 'q1')                          // 首轮 startTurn → turn_start #1
+    await flush()
+    claude.emit({ type: 'result', stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 } })
+    await flush()                                     // q1 完成、query 保活
+    rt.submit(sess.id, 'q2')                          // 空闲续投 pushUser → turn_start #2
+    await flush()
+    expect(seen.filter((e) => e.type === 'turn_start')).toHaveLength(2)
   })
 
   it('claude 持久 query：q1 完成后保活（running false 但 query 不退出）→ 空闲 submit q2 复用同 query（不重 spawn / 不 resume）', async () => {
@@ -233,17 +285,15 @@ describe('SessionRuntime 消息附件（contextFiles）', () => {
     return { db, work, sess, rt, children, claude }
   }
 
-  it('项目内附件：transcript 写 user_prompt（含 attachments）；引擎 prompt 带 preamble；messages 表无写入', () => {
+  it('项目内附件：transcript 写 user_prompt（含 attachments）；引擎 prompt 带 preamble', () => {
     const transcriptDir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-rt-')); dirs.push(transcriptDir)
-    const { db, work, sess, rt, children } = realProject('codex', transcriptDir)
+    const { work, sess, rt, children } = realProject('codex', transcriptDir)
     fs.mkdirSync(path.join(work, 'attachments')); fs.writeFileSync(path.join(work, 'attachments', 'a.png'), 'x')
     rt.submit(sess.id, '看下这张图', ['attachments/a.png'])
     // transcript 里有 user_prompt，raw 包含原文 + attachments
     const rec = readRecords(transcriptDir, sess.id)[0]
     expect(rec).toMatchObject({ type: 'user_prompt', raw: { text: '看下这张图' } })
     expect((rec.raw as any).attachments).toContainEqual({ name: 'a.png', path: 'attachments/a.png' })
-    // messages 表无写入
-    expect(getMessages(db, sess.id)).toHaveLength(0)
     // 引擎 prompt（codex 原样文本）带 preamble
     expect(children[0].stdinWrites[0]).toBe('看下这张图\n\nAttached project files: `attachments/a.png`')
   })
@@ -258,12 +308,10 @@ describe('SessionRuntime 消息附件（contextFiles）', () => {
 
   it('无 contextFiles：transcript 写 user_prompt（无附件），prompt 不带 preamble（回归）', () => {
     const transcriptDir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-rt-')); dirs.push(transcriptDir)
-    const { db, sess, rt, children } = realProject('codex', transcriptDir)
+    const { sess, rt, children } = realProject('codex', transcriptDir)
     rt.submit(sess.id, '纯文本')
     // transcript 记录 user_prompt，attachments 为空数组
     expect(readRecords(transcriptDir, sess.id)[0]).toMatchObject({ type: 'user_prompt', raw: { text: '纯文本', attachments: [] } })
-    // messages 表无写入
-    expect(getMessages(db, sess.id)).toHaveLength(0)
     expect(children[0].stdinWrites[0]).toBe('纯文本')
   })
 
@@ -286,6 +334,168 @@ describe('SessionRuntime 消息附件（contextFiles）', () => {
     // query2 的 additionalDirectories 累积 extA + extB
     const dirs2: string[] = claude.instances[1].options.additionalDirectories
     expect(dirs2).toContain(extA); expect(dirs2).toContain(extB)
+  })
+})
+
+describe('SessionRuntime 图片内联（仅 claude）', () => {
+  let dirs: string[] = []
+  afterEach(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); dirs = [] })
+  function realProject(engine: 'claude' | 'codex', transcriptDir?: string) {
+    const work = fs.mkdtempSync(path.join(os.tmpdir(), 'as-img-rt-')); dirs.push(work)
+    const db = openDatabase(':memory:')
+    const proj = createProject(db, { name: 'p', path: work })
+    const sess = createSession(db, { projectId: proj.id, engine, model: engine === 'claude' ? 'opus' : 'gpt-5' })
+    const children: any[] = []
+    const spawnFn = ((bin: string, args: string[]) => { const cp = fakeChild(); cp.spawnArgs = args; children.push(cp); return cp }) as any
+    const claude = fakeClaudeQuery()
+    const rt = new SessionRuntime({ db, resolveBin: () => '/abs/bin', spawnFn, claudeQueryFn: claude.queryFn as any, transcriptDir })
+    return { db, work, sess, rt, children, claude }
+  }
+  function writePng(work: string, rel = 'attachments/a.png'): void {
+    const abs = path.join(work, rel); fs.mkdirSync(path.dirname(abs), { recursive: true }); fs.writeFileSync(abs, Buffer.alloc(10, 1))
+  }
+
+  it('claude 首轮：项目内图片 → 内联 base64 image 块；preamble 不含该图路径', async () => {
+    const { work, sess, rt, claude } = realProject('claude')
+    writePng(work)
+    rt.submit(sess.id, '看下这张图', ['attachments/a.png'])
+    await flush()
+    const content = claude.current().contents[0]
+    expect(content[0]).toMatchObject({ type: 'image', source: { type: 'base64', media_type: 'image/png' } })
+    expect(content.at(-1)).toMatchObject({ type: 'text', text: '看下这张图' })   // 纯图无 preamble
+    expect(JSON.stringify(content)).not.toContain('Attached project files')
+  })
+
+  it('claude 图文混合：图片内联、非图片走 preamble（同条消息分流）', async () => {
+    const { work, sess, rt, claude } = realProject('claude')
+    writePng(work)
+    fs.writeFileSync(path.join(work, 'attachments', 'n.md'), 'hi')
+    rt.submit(sess.id, '看图读文', ['attachments/a.png', 'attachments/n.md'])
+    await flush()
+    const content = claude.current().contents[0]
+    expect(content.filter((b: any) => b.type === 'image')).toHaveLength(1)
+    const text = content.find((b: any) => b.type === 'text').text
+    expect(text).toContain('Attached project files: `attachments/n.md`')   // 非图走 preamble
+    expect(text).not.toContain('a.png')                                     // 图片不在 preamble
+  })
+
+  it('codex：图片不内联，路径仍走 preamble（无 image 块，回归）', () => {
+    const { work, sess, rt, children } = realProject('codex')
+    writePng(work)
+    rt.submit(sess.id, '看下这张图', ['attachments/a.png'])
+    expect(children[0].stdinWrites[0]).toBe('看下这张图\n\nAttached project files: `attachments/a.png`')
+  })
+
+  it('claude 空闲续投：第二轮带图 → 复用同 query pushUser 带 image 块', async () => {
+    const { work, sess, rt, claude } = realProject('claude')
+    writePng(work)
+    rt.submit(sess.id, 'q1')
+    await flush()
+    claude.emit({ type: 'result', stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 } })
+    await flush()   // q1 完成，query 保活
+    rt.submit(sess.id, '看图', ['attachments/a.png'])   // 空闲续投带图
+    await flush()
+    expect(claude.instances.length).toBe(1)             // 复用同 query
+    const content2 = claude.current().contents[1]
+    expect(content2[0]).toMatchObject({ type: 'image', source: { media_type: 'image/png' } })
+  })
+
+  it('claude 运行中入队：排队消息带图 → turn_end 后 pushUser 带 image 块', async () => {
+    const { work, sess, rt, claude } = realProject('claude')
+    writePng(work)
+    rt.submit(sess.id, 'q1')
+    await flush()
+    rt.submit(sess.id, '看图', ['attachments/a.png'])   // 运行中入队
+    claude.emit({ type: 'result', stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 } })
+    await flush()
+    const content2 = claude.current().contents[1]
+    expect(content2[0]).toMatchObject({ type: 'image', source: { media_type: 'image/png' } })
+  })
+
+  it('claude 排队重启 query（队列项引用新外部目录）→ onDone 起新 query 首条 content 带 image 块', async () => {
+    const { work, sess, rt, claude } = realProject('claude')
+    writePng(work)
+    const ext = fs.mkdtempSync(path.join(os.tmpdir(), 'as-img-ext-')); dirs.push(ext)
+    fs.writeFileSync(path.join(ext, 'doc.pdf'), 'x')
+    rt.submit(sess.id, 'm1')                            // query1 起，无外部目录
+    await flush()
+    rt.submit(sess.id, '看图读外部', ['attachments/a.png', path.join(ext, 'doc.pdf')])   // 运行中入队，引用新外部目录
+    claude.emit({ type: 'result', stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 } })
+    await flush()
+    // ext 未授权 → 排空 → onDone 起 query2，带图
+    expect(claude.instances.length).toBe(2)
+    const content2 = claude.instances[1].contents[0]
+    expect(content2[0]).toMatchObject({ type: 'image', source: { media_type: 'image/png' } })
+  })
+
+  it('claude：内联图片后 transcript 仍记录全部 listed（含图片路径，供 ChatLog 缩略图回显）', async () => {
+    const trDir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-img-tr-')); dirs.push(trDir)
+    const { work, sess, rt, claude } = realProject('claude', trDir)
+    writePng(work)
+    rt.submit(sess.id, '看图', ['attachments/a.png'])
+    await flush()
+    const rec = readRecords(trDir, sess.id)[0]
+    expect((rec.raw as any).attachments).toContainEqual({ name: 'a.png', path: 'attachments/a.png' })
+  })
+})
+
+describe('SessionRuntime 子代理归属落库（parentToolUseId 持久化，F1）', () => {
+  it('claude：子代理块的 parentToolUseId 随 assistant_blocks 落库 → 重载后可重建形态 A/B 嵌套', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-rt-'))
+    try {
+      const { sess, rt, claude } = setup('claude', { transcriptDir: dir })
+      rt.subscribe(sess.id, () => {})
+      rt.submit(sess.id, 'q1')
+      await flush()
+      // 主线：派生子代理的 Task tool_use（无 parent）
+      claude.emit({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'tu1', name: 'Task', input: { subagent_type: 'general-purpose', description: 'x' } }] } })
+      // 子代理内部：带顶层 parent_tool_use_id 的 tool_use（text 会被流式去重，故以 tool_use 验证归属落库）
+      claude.emit({ type: 'assistant', parent_tool_use_id: 'tu1', message: { content: [{ type: 'tool_use', id: 'r1', name: 'Read', input: { file_path: 'a' } }] } })
+      claude.emit({ type: 'result', stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 } })
+      await flush()
+      const rec = readRecords(dir, sess.id).find((r) => r.type === 'assistant_blocks')!
+      const blocks = (rec.raw as { blocks: Array<Record<string, unknown>> }).blocks
+      const task = blocks.find((b) => b.id === 'tu1')!
+      const read = blocks.find((b) => b.id === 'r1')!
+      expect(task).toMatchObject({ type: 'tool_use', name: 'Task' })
+      expect(task.parentToolUseId).toBeUndefined()                 // 主线 Task 块无归属
+      expect(read).toMatchObject({ type: 'tool_use', parentToolUseId: 'tu1' })   // 子代理块归属落库（关键）
+    } finally { fs.rmSync(dir, { recursive: true, force: true }) }
+  })
+
+  it('claude：task_started.skip_transcript 回填到 Task 块并落库（Task 块先到，back-fill；§9.5 重载仍成立）', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-rt-'))
+    try {
+      const { sess, rt, claude } = setup('claude', { transcriptDir: dir })
+      rt.subscribe(sess.id, () => {})
+      rt.submit(sess.id, 'q1')
+      await flush()
+      claude.emit({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'tu1', name: 'Task', input: { subagent_type: 'web-research', description: 'x' } }] } })
+      claude.emit({ type: 'system', subtype: 'task_started', task_id: 'tk1', tool_use_id: 'tu1', subagent_type: 'web-research', description: 'x', skip_transcript: true })
+      claude.emit({ type: 'result', stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 } })
+      await flush()
+      const rec = readRecords(dir, sess.id).find((r) => r.type === 'assistant_blocks')!
+      const blocks = (rec.raw as { blocks: Array<Record<string, unknown>> }).blocks
+      expect(blocks.find((b) => b.id === 'tu1')).toMatchObject({ type: 'tool_use', name: 'Task', skipTranscript: true })
+    } finally { fs.rmSync(dir, { recursive: true, force: true }) }
+  })
+
+  it('claude：task_started 先于 Task 块到达时也能标记（skipToolUses set 兜底，不臆断 SDK 时序）', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-rt-'))
+    try {
+      const { sess, rt, claude } = setup('claude', { transcriptDir: dir })
+      rt.subscribe(sess.id, () => {})
+      rt.submit(sess.id, 'q1')
+      await flush()
+      // 反序：task_started 先到（Task 块尚未入 blocks）→ 记入 set；Task 块后到 → 落库时带上 skipTranscript
+      claude.emit({ type: 'system', subtype: 'task_started', task_id: 'tk1', tool_use_id: 'tu2', subagent_type: 'web-research', description: 'x', skip_transcript: true })
+      claude.emit({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'tu2', name: 'Task', input: { subagent_type: 'web-research', description: 'x' } }] } })
+      claude.emit({ type: 'result', stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 } })
+      await flush()
+      const rec = readRecords(dir, sess.id).find((r) => r.type === 'assistant_blocks')!
+      const blocks = (rec.raw as { blocks: Array<Record<string, unknown>> }).blocks
+      expect(blocks.find((b) => b.id === 'tu2')).toMatchObject({ type: 'tool_use', name: 'Task', skipTranscript: true })
+    } finally { fs.rmSync(dir, { recursive: true, force: true }) }
   })
 })
 
@@ -373,5 +583,184 @@ describe('SessionRuntime 运行时档位（claude 权限/思考强度）', () =>
   it('resolveDecision 委托给活 claude handle（无活会话静默忽略不抛）', async () => {
     const { sess, rt } = setup('claude')
     expect(() => rt.resolveDecision(sess.id, 'nope', { behavior: 'allow' })).not.toThrow()
+  })
+})
+
+describe('SessionRuntime Provider creds 注入', () => {
+  it('startTurn 把 active provider creds 注入 claude SDK 的 env（真实注入链）', async () => {
+    const db = openDatabase(':memory:')
+    const proj = createProject(db, { name: 'p', path: '/work' })
+    const sess = createSession(db, { projectId: proj.id, engine: 'claude', model: 'opus' })
+    const claude = fakeClaudeQuery()
+    const rt = new SessionRuntime({
+      db,
+      resolveBin: () => '/abs/bin',
+      claudeQueryFn: claude.queryFn as any,
+      resolveCreds: (engine) => engine === 'claude' ? { baseUrl: 'https://relay', apiKey: 'sk-1', keyEnv: 'auth_token' } : undefined,
+    })
+    rt.submit(sess.id, 'hi')
+    await flush()
+    const env = claude.current().options.env
+    expect(env.ANTHROPIC_BASE_URL).toBe('https://relay')
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBe('sk-1')
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined()
+  })
+
+  it('resolveCreds 返回 undefined（选默认）→ 不注入任何凭证变量（§2b 默认登录态）', async () => {
+    const db = openDatabase(':memory:')
+    const proj = createProject(db, { name: 'p', path: '/work' })
+    const sess = createSession(db, { projectId: proj.id, engine: 'claude', model: 'opus' })
+    const claude = fakeClaudeQuery()
+    const rt = new SessionRuntime({
+      db,
+      resolveBin: () => '/abs/bin',
+      claudeQueryFn: claude.queryFn as any,
+      resolveCreds: () => undefined,   // 选「默认」= 永不注入
+    })
+    rt.submit(sess.id, 'hi')
+    await flush()
+    const env = claude.current().options.env
+    expect(env.ANTHROPIC_BASE_URL).toBeUndefined()
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined()
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined()
+  })
+})
+
+describe('claude supportedCommands 链路', () => {
+  it('活会话：rt.supportedCommands 调句柄 supportedCommands() 并缓存其返回', async () => {
+    const { sess, rt } = setup('claude')
+    rt.submit(sess.id, '起一轮')
+    await flush()
+    const got = await rt.supportedCommands(sess.id)
+    expect(got).toEqual([{ name: 'plan', description: '进入计划模式', argumentHint: '' }])
+  })
+
+  it('无活会话但跑过 claude：回最近缓存（首会话拉过即有）', async () => {
+    const { sess, rt, claude } = setup('claude')
+    rt.submit(sess.id, '起一轮')
+    await flush()
+    await rt.supportedCommands(sess.id)   // 活会话拉一次 → 写缓存
+    // 让本轮自然结束 + query 退出 → 无活句柄
+    claude.emit({ type: 'result', subtype: 'success' })
+    await flush()
+    rt.interrupt(sess.id); await flush()
+    const cached = await rt.supportedCommands(sess.id)
+    expect(cached).toEqual([{ name: 'plan', description: '进入计划模式', argumentHint: '' }])
+  })
+
+  it('四态：从未跑过 claude 会话 → 走 cwd 探针返回命令（不再 null）', async () => {
+    const { sess, rt, probeCalls } = setup('claude')
+    const got = await rt.supportedCommands(sess.id)
+    expect(got).toEqual(PROBE_CMDS)                 // 探针填充，非 null
+    expect(probeCalls).toEqual([{ cwd: '/work', addDirs: [] }])   // 用该会话 cwd（project.path）探一次
+  })
+
+  it('四态：探针失败 → 返回 []（不再 null；前端无静态可回落）', async () => {
+    const { sess, rt } = setup('claude', { probeCommandsFn: async () => [] })
+    expect(await rt.supportedCommands(sess.id)).toEqual([])
+  })
+
+  it('四态：codex 会话不探 claude 命令 → []（commands 是 claude SDK 能力）', async () => {
+    const { sess, rt, probeCalls } = setup('codex')
+    expect(await rt.supportedCommands(sess.id)).toEqual([])
+    expect(probeCalls).toEqual([])                  // 不对 codex 会话起 claude 探针
+  })
+
+  it('cwd 缓存：二次取数命中缓存、不重探', async () => {
+    const { sess, rt, probeCalls } = setup('claude')
+    await rt.supportedCommands(sess.id)
+    await rt.supportedCommands(sess.id)
+    expect(probeCalls.length).toBe(1)               // 同 cwd 第二次读缓存，探针只跑一次
+  })
+
+  it('cwd 探针并发去重：同 cwd 并发取数只探一次', async () => {
+    let resolveProbe!: (v: any[]) => void
+    const probeCommandsFn = () => new Promise<any[]>((res) => { resolveProbe = res })
+    let calls = 0
+    const wrapped = (o: any) => { calls++; return probeCommandsFn() }
+    const { sess, rt } = setup('claude', { probeCommandsFn: wrapped })
+    const p1 = rt.supportedCommands(sess.id)
+    const p2 = rt.supportedCommands(sess.id)
+    resolveProbe(PROBE_CMDS)
+    const [a, b] = await Promise.all([p1, p2])
+    expect(a).toEqual(PROBE_CMDS); expect(b).toEqual(PROBE_CMDS)
+    expect(calls).toBe(1)                            // 并发同 cwd 只触发一次探针
+  })
+
+  it('活查询优先：有活句柄时用 live supportedCommands，不走 cwd 探针', async () => {
+    const { sess, rt, probeCalls } = setup('claude')
+    rt.submit(sess.id, '起一轮')
+    await flush()
+    const got = await rt.supportedCommands(sess.id)
+    expect(got).toEqual([{ name: 'plan', description: '进入计划模式', argumentHint: '' }])
+    expect(probeCalls).toEqual([])                   // 活会话不探针
+  })
+
+  it('commands_changed 系统消息：覆盖缓存（REPLACE 而非合并）', async () => {
+    const { sess, rt, claude } = setup('claude')
+    rt.submit(sess.id, '起一轮')
+    await flush()
+    await rt.supportedCommands(sess.id)   // 缓存 = init 快照（plan）
+    // SDK 推送 commands_changed → onCommandsChanged 写缓存
+    claude.emit({ type: 'system', subtype: 'commands_changed', commands: [{ name: 'review', description: '审查改动', argumentHint: '' }] })
+    await flush()
+    const got = await rt.supportedCommands(sess.id)
+    expect(got).toEqual([{ name: 'review', description: '审查改动', argumentHint: '' }])
+  })
+
+  it('commands_changed 经 onEvent 扇出给订阅者（→ SSE 实时推前端，P1）', async () => {
+    const { sess, rt, claude } = setup('claude')
+    const seen: AgentEvent[] = []
+    rt.subscribe(sess.id, (e) => seen.push(e))
+    rt.submit(sess.id, '起一轮')
+    await flush()
+    const newCmds = [{ name: 'review', description: '审查改动', argumentHint: '' }]
+    claude.emit({ type: 'system', subtype: 'commands_changed', commands: newCmds })
+    await flush()
+    const ev = seen.find((e) => e.type === 'commands_changed') as { type: string; commands: unknown[] } | undefined
+    expect(ev).toBeDefined()
+    expect(ev!.commands).toEqual(newCmds)
+  })
+
+  it('命令缓存按 sessionId 分桶：A 的缓存不串给 B，对 A 推 commands_changed 不影响 B', async () => {
+    const { db, proj, sess: sessA, rt, claude } = setup('claude')
+    // 同一 runtime 下再建第二个 claude 会话 B（B 从未跑过）
+    const sessB = createSession(db, { projectId: proj.id, engine: 'claude', model: 'opus' })
+
+    // A 跑一轮 + 拉命令 → A 有缓存
+    rt.submit(sessA.id, '起一轮')
+    await flush()
+    const gotA = await rt.supportedCommands(sessA.id)
+    expect(gotA).toEqual([{ name: 'plan', description: '进入计划模式', argumentHint: '' }])
+
+    // B 从未跑过 → 走 cwd 探针（不串 A 的 live 缓存）：拿到的是探针结果而非 A 的 'plan'
+    expect(await rt.supportedCommands(sessB.id)).toEqual(PROBE_CMDS)
+
+    // 对 A 推 commands_changed（claude.emit 命中最近的 query 实例 = A）→ 只更新 A 的会话桶，B 不受影响（仍走探针）
+    claude.emit({ type: 'system', subtype: 'commands_changed', commands: [{ name: 'review', description: '审查改动', argumentHint: '' }] })
+    await flush()
+    expect(await rt.supportedCommands(sessA.id)).toEqual([{ name: 'review', description: '审查改动', argumentHint: '' }])
+    expect(await rt.supportedCommands(sessB.id)).toEqual(PROBE_CMDS)
+  })
+})
+
+describe('claude 项目级命令（无会话入口 projectCommands）', () => {
+  it('按 project.path 当 cwd 走同一 cwd 探针缓存', async () => {
+    const { proj, rt, probeCalls } = setup('claude')
+    const got = await rt.projectCommands(proj.id)
+    expect(got).toEqual(PROBE_CMDS)
+    expect(probeCalls).toEqual([{ cwd: '/work', addDirs: [] }])
+  })
+
+  it('项目不存在 → []（route 层另做 404；运行时只回空）', async () => {
+    const { rt } = setup('claude')
+    expect(await rt.projectCommands('nope')).toEqual([])
+  })
+
+  it('与会话入口共享 cwd 缓存：projectCommands 探过后，同 cwd 会话取数命中缓存不重探', async () => {
+    const { proj, sess, rt, probeCalls } = setup('claude')
+    await rt.projectCommands(proj.id)          // 探一次，填 cwd='/work' 缓存
+    await rt.supportedCommands(sess.id)        // 同 cwd → 命中缓存
+    expect(probeCalls.length).toBe(1)
   })
 })

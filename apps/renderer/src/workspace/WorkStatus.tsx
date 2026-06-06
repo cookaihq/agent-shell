@@ -5,40 +5,34 @@
  * 瞬时、不落库；turn_end 后 liveProgress 清空 → 本行消失。
  * 视觉对齐原型 workspace.html 的 .work-status（base.css .work-status 系列样式）。
  *
- * 动作措辞与 blocks/OpCard 对齐（读取/运行命令/编辑/任务计划），工具名判定用与 kindOf 一致的正则；
- * 无专门映射的工具走「正在调用 {工具名}」兜底（kindOf 对未知工具默认归 read，不能直接复用，故显式匹配）。
+ * Dumb 件：只接收已翻译好的 label 字符串（activity→label 翻译由各 Agent 切片负责）。
+ * 无 label → 起步态（脉冲点 + 「处理中…」，无 tokens 段）。
  */
-import type { ProgressActivity } from './chatReducer'
-
-// 取路径末段做简短展示（与 mock 的 styles.css 一致）；命令类 target 不在此展示。
-const baseName = (p: string): string => p.split('/').pop() || p
 
 // 超过千位用 K 缩写（如 7803 → 7.8K），千位以内显示原值。
 const fmtTokens = (n: number): string => (n < 1000 ? `${n}` : `${(n / 1000).toFixed(1)}K`)
 
-function activityLabel(a: ProgressActivity): string {
-  if (a.kind === 'thinking') return '思考中'
-  if (a.kind === 'responding') return '撰写回复'
-  const file = a.target ? baseName(a.target) : ''
-  if (/^(Edit|Write|MultiEdit)$/.test(a.tool)) return file ? `正在编辑 ${file}` : '正在编辑'
-  if (a.tool === 'Read') return file ? `正在读取 ${file}` : '正在读取'
-  if (a.tool === 'Bash') return '正在运行命令'
-  if (a.tool === 'TodoWrite') return '更新任务计划'
-  return a.tool ? `正在调用 ${a.tool}` : '处理中'
-}
-
 interface WorkStatusProps {
-  tokens: number
-  activity: ProgressActivity
+  tokens?: number
+  label?: string
 }
 
-export function WorkStatus({ tokens, activity }: WorkStatusProps) {
+export function WorkStatus({ tokens, label }: WorkStatusProps) {
+  // 起步态（发送后、首个 progress 事件到来前）：只显示脉冲点 + 「处理中…」，不留空窗。
+  if (!label) {
+    return (
+      <div className="work-status">
+        <span className="ws-dot" />
+        <span className="ws-label">处理中…</span>
+      </div>
+    )
+  }
   return (
     <div className="work-status">
       <span className="ws-dot" />
-      <span className="ws-label">{activityLabel(activity)}</span>
+      <span className="ws-label">{label}</span>
       <span className="ws-sep">·</span>
-      <span className="ws-tokens"><b>{fmtTokens(tokens)}</b> tokens</span>
+      <span className="ws-tokens"><b>{fmtTokens(tokens ?? 0)}</b> tokens</span>
     </div>
   )
 }

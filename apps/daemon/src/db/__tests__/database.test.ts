@@ -5,10 +5,11 @@ import { openDatabase, defaultDbPath } from '../database'
 import { initSchema } from '../schema'
 
 describe('openDatabase', () => {
-  it(':memory: 开库后四张表已建', () => {
+  it(':memory: 开库后三张表已建', () => {
     const db = openDatabase(':memory:')
     const names = db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map((r: any) => r.name)
-    for (const t of ['projects', 'sessions', 'messages', 'usage']) expect(names).toContain(t)
+    for (const t of ['projects', 'sessions', 'usage']) expect(names).toContain(t)
+    expect(names).not.toContain('messages')
     db.close()
   })
 

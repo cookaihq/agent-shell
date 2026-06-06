@@ -23,9 +23,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # pnpm 版本不在此写死：action-setup 读根 package.json 的 packageManager(pnpm@9.12.0)，
+      # 与 lockfile/本地开发同源。曾因这里另写 version:10 与 packageManager 冲突，
+      # action-setup 报 ERR_PNPM_BAD_PM_VERSION，mac/win 两 job 全挂在此步、release 一直发不出。
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10
 
       - uses: actions/setup-node@v4
         with:

@@ -1,15 +1,14 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import type { Engine } from '@agent-shell/contracts'
+import { collapseStreamingText } from '@agent-shell/contracts'
+import type { TranscriptRecord } from '@agent-shell/contracts'
 import { channelDataDir } from '../paths'
 
-/** 一条 transcript 记录（引擎中立信封 + 原始负载）。 */
-export interface TranscriptRecord {
-  ts: number
-  engine: Engine
-  type: string
-  raw: unknown
-}
+// TranscriptRecord 与 collapseStreamingText 已下沉 @agent-shell/contracts（renderer 切片 historyService 重建复用同一份）。
+// daemon 这里 re-export，让本模块及现有引用方（sessionRuntime onTurnEnd 落库前折叠、测试）无需改 import 来源。
+export type { TranscriptRecord }
+export { collapseStreamingText }
 
 /** 会话正文目录 = {channelDataDir}/sessions（与 app.sqlite 同处，随渠道隔离）。 */
 export function sessionsDir(): string {
@@ -47,45 +46,6 @@ export function readRecords(dir: string, sessionId: string): TranscriptRecord[] 
   return out
 }
 
-export interface TranscriptMessage {
-  id: string
-  sessionId: string
-  role: 'user' | 'assistant'
-  blocks: unknown[]
-  createdAt: number
-  sdkMessageId?: string
-  sdkUuid?: string
-}
-
-/** transcript 记录 → 按回合的消息（DTO 形）。渲染源统一为 assistant_blocks（含真实 thinking）；
- *  claude 原始流记录仅用于提取本回合的 msg_id / uuid，不参与渲染，保证历史 === 实时。 */
-export function transcriptToMessages(sessionId: string, records: TranscriptRecord[]): TranscriptMessage[] {
-  const out: TranscriptMessage[] = []
-  let ord = 0
-  let pendingMsgId: string | undefined
-  let pendingUuid: string | undefined
-  for (const rec of records) {
-    if (rec.type === 'user_prompt') {
-      const r = (rec.raw ?? {}) as { text?: string; attachments?: { name: string; path: string }[] }
-      const blocks: unknown[] = [{ type: 'text', text: r.text ?? '' }]
-      if (r.attachments && r.attachments.length > 0) blocks.push({ type: 'attachments', files: r.attachments })
-      out.push({ id: `${sessionId}#${ord++}`, sessionId, role: 'user', blocks, createdAt: rec.ts })
-      continue
-    }
-    if (rec.type === 'assistant_blocks') {
-      const r = (rec.raw ?? {}) as { blocks?: unknown[] }
-      out.push({ id: `${sessionId}#${ord++}`, sessionId, role: 'assistant', blocks: r.blocks ?? [], createdAt: rec.ts, sdkMessageId: pendingMsgId, sdkUuid: pendingUuid })
-      pendingMsgId = undefined; pendingUuid = undefined
-      continue
-    }
-    // claude 原始流记录：仅用于取本回合 msg_id/uuid（不参与渲染）
-    if (rec.engine === 'claude') {
-      const raw = rec.raw as any
-      if (raw?.type === 'assistant') {
-        if (typeof raw.message?.id === 'string') pendingMsgId = raw.message.id
-        if (typeof raw.uuid === 'string') pendingUuid = raw.uuid
-      }
-    }
-  }
-  return out
-}
+// §8：transcript 记录 → MessageDTO 的重建职责已整体下沉 renderer 各切片 historyService.rebuildBlocks
+// （claude 切片含 msg_id 提取、codex 切片仅共享骨架），daemon 不再保留 transcriptToMessages / TranscriptMessage。
+// collapseStreamingText 仍在本模块 re-export 供 onTurnEnd 落库前折叠（§13 勿丢），且共享自 contracts。

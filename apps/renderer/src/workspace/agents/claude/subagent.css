@@ -1,0 +1,61 @@
+/* claude 切片 subagent 样式（从 base.css 物理拆出，spec §6/D4）。CSS 全局生效，此处仅物理归位切片。 */
+
+/* ── 子代理（Task 派生 subagent）形态 A·时间线就地嵌套 [移植自原型开发版 base.css；四态用 renderer token R1] ── */
+.tl-dot.agent{background:var(--blue)}
+.tl-dot.agent.run{background:var(--blue);animation:pulse 1.3s ease-in-out infinite}
+.subagent{min-width:0}
+.subagent>summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:8px;min-width:0;font-size:13px;line-height:1.5}
+.subagent>summary::-webkit-details-marker{display:none}
+.sa-ava{flex:0 0 auto;width:19px;height:19px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;font-family:var(--mono);background:var(--blue-bg);color:var(--blue);border:1px solid var(--blue-border)}
+.sa-ava.general{background:var(--amber-bg);color:var(--amber);border-color:color-mix(in srgb,var(--amber) 28%,transparent)}
+.sa-ava.research{background:var(--purple-bg);color:var(--purple);border-color:var(--purple-border)}
+.sa-name{flex:0 0 auto;font-weight:700;color:var(--text-strong)}
+.sa-tag{flex:0 0 auto;font-size:10px;font-weight:600;letter-spacing:.03em;padding:1px 6px;border-radius:999px;background:var(--blue-bg);color:var(--blue);border:1px solid var(--blue-border)}
+.sa-desc{flex:1 1 auto;min-width:0;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sa-stat{flex:0 0 auto;font-size:10.5px;padding:1px 8px;border-radius:999px;border:1px solid var(--border);color:var(--text-muted)}
+.sa-stat.run{color:var(--amber);background:var(--amber-bg);border-color:color-mix(in srgb,var(--amber) 28%,transparent)}
+.sa-stat.done{color:var(--green);background:var(--green-bg);border-color:var(--green-border)}
+.sa-stat.fail{color:var(--red);background:var(--red-bg);border-color:var(--red-border)}
+.sa-stat.stop{color:var(--text-muted);background:var(--bg-subtle);border-color:var(--border)}
+.sa-meta{flex:0 0 auto;font-family:var(--mono);font-size:10.5px;color:var(--text-soft)}
+.sa-chev{flex:0 0 auto;color:var(--text-faint);transition:transform .15s}
+.subagent[open]>summary .sa-chev{transform:rotate(90deg)}
+.sa-inner{display:none;margin:9px 0 2px;padding-left:14px;border-left:2px solid var(--blue-border)}
+.subagent[open] .sa-inner{display:block}
+.sa-inner .chat-timeline{margin:0}
+/* 形態 C·头像身份入口（header）：前2头像堆叠 + 末尾虚线圈⋯；无数字无橙点（D8）[移植自原型开发版] */
+.sa-entry{position:relative;display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 9px;border:1px solid transparent;border-radius:7px;background:transparent;color:var(--text-muted);cursor:pointer;font-size:12px;flex:0 0 auto}
+.sa-entry:hover{background:var(--bg-subtle);color:var(--text)}
+.sa-stack{display:inline-flex}
+.sa-stack .sa-ava{width:18px;height:18px;font-size:9.5px;margin-left:-6px;box-shadow:0 0 0 1.5px var(--bg-panel)}
+.sa-stack .sa-ava-more{background:var(--bg-panel);color:var(--text-soft);border:1px dashed var(--text-faint);font-size:11px;font-weight:400}
+.sa-stack .sa-ava:first-child{margin-left:0}
+/* 形态 B·右侧聚合面板（Gallery/Board）[移植自原型开发版 base.css] */
+.fw-panel-agents{flex-direction:column}
+/* 特异性 (0,3,0) 稳压后定义的基类 .fw-panel.is-active{display:block}(0,2,0)——否则面板退化 block、卡片高度链断裂 */
+.fw-panel.fw-panel-agents.is-active{display:flex}
+.sa-pbar{flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 14px;border-bottom:1px solid var(--border);font-size:12px;color:var(--text-muted)}
+.sa-pbar b{color:var(--text-strong)}
+.sa-viewseg{flex:0 0 auto;display:inline-flex;gap:2px;padding:2px;background:var(--bg-subtle);border-radius:7px}
+.sa-vbtn{border:0;background:transparent;color:var(--text-muted);font-size:11.5px;padding:3px 10px;border-radius:5px;cursor:pointer}
+.sa-vbtn.is-active{background:var(--bg-panel);color:var(--text-strong);box-shadow:var(--shadow-xs)}
+.sa-plist{flex:1 1 auto;min-height:0;padding:12px}
+.sa-plist.gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));grid-auto-rows:90%;gap:12px;align-content:start;overflow-y:auto}
+.sa-plist.gallery .sa-card{display:flex;flex-direction:column}
+.sa-plist.gallery .sa-card .sa-card-body{flex:1 1 auto;overflow-y:auto}
+.sa-plist.board{display:flex;gap:12px;overflow-x:auto;overflow-y:hidden}
+.sa-plist.board .sa-card{flex:0 0 320px;width:320px;height:100%;display:flex;flex-direction:column}
+.sa-plist.board .sa-card .sa-card-body{flex:1 1 auto;overflow-y:auto}
+.sa-card{border:1px solid var(--border);border-radius:10px;background:var(--bg-panel);overflow:hidden;box-shadow:var(--shadow-xs)}
+.sa-card.is-run{border-color:var(--blue-border);box-shadow:0 0 0 3px color-mix(in srgb,var(--blue) 7%,transparent)}
+.sa-card-head{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--border-soft);font-size:13px}
+.sa-card-head .sa-tag{display:none}
+.sa-card-head .sa-stat{margin-left:auto}
+.sa-card-head .sa-parent{font-size:11px;color:var(--text-soft);font-family:var(--mono)}
+.sa-card-body{padding:0 12px 4px}
+.sa-card-body .sa-task{position:sticky;top:0;margin:0 -12px;padding:9px 12px 8px;background:var(--bg-panel);font-size:12px;line-height:1.5;color:var(--text);border-bottom:1px solid var(--border-soft);z-index:2}
+.sa-card-body .chat-timeline{margin:0;padding-top:8px}
+/* flat 委托行（孙代理跳转，D16）：父卡片内 Task 块渲染为可点击行，跳到对应子代理卡片 */
+.sa-delegate{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--border);border-radius:7px;background:transparent;color:var(--text-muted);font-size:12.5px;padding:4px 8px;cursor:pointer}
+.sa-delegate:hover{background:var(--bg-subtle);color:var(--text)}
+.sa-delegate .sa-deleg-label{color:var(--text-faint);font-size:11px}

@@ -19,6 +19,8 @@
  */
 import { useEffect, useRef, useState } from 'react'
 import type { UsageDTO } from '../api/types'
+import type { Engine } from '@agent-shell/contracts'
+import { getSlice } from './agents/registry'
 
 // ── 格式化工具 ────────────────────────────────────────────────────────────────
 
@@ -55,8 +57,8 @@ function cachedWin(model: string | undefined): number | undefined {
   return readWinCache()[model]
 }
 
-const ctxWindow = (usage: UsageDTO | undefined, model?: string): number =>
-  usage?.contextWindow || cachedWin(model) || DEFAULT_CTX_WINDOW
+const ctxWindow = (usage: UsageDTO | undefined, model?: string, engine?: Engine): number =>
+  usage?.contextWindow || cachedWin(model) || (engine ? getSlice(engine).getContextWindowSize?.(model ?? '') : undefined) || DEFAULT_CTX_WINDOW
 const fmtK = (n: number): string => (n < 1000 ? `${n}` : `${Math.round(n / 1000)}k`)
 
 function ctxPercent(used: number, win: number): number {
@@ -105,9 +107,11 @@ interface CtxMeterProps {
   model?: string
   /** 运行中的实时 token 估算（来自 progress 事件）；提供即表示本轮进行中（Issue 10 实时同步）。 */
   liveTokens?: number
+  /** 引擎标识符（claude/codex）——用于切片 getContextWindowSize 回落（Task 1.5）。 */
+  engine: Engine
 }
 
-export function CtxMeter({ usage, model, liveTokens }: CtxMeterProps) {
+export function CtxMeter({ usage, model, liveTokens, engine }: CtxMeterProps) {
   const [open, setOpen] = useState(false)
   const wrapRef = useRef<HTMLDivElement>(null)
 
@@ -136,13 +140,15 @@ export function CtxMeter({ usage, model, liveTokens }: CtxMeterProps) {
 
   const inputTokens  = usage?.inputTokens  ?? 0
   const outputTokens = usage?.outputTokens ?? 0
-  const costUsd      = usage?.costUsd      ?? 0
-  const win = ctxWindow(usage, model)
-  // Issue 10：本轮进行中（liveTokens 有值）时用实时估算近似——输出取「已落库 vs 实时估算」较大者，
-  // 上下文「已用」叠加实时输出（output 也占窗口），让弹窗随 progress 实时动而非停在上次 result（新会话即 0）。
+  const costUsd      = usage?.costUsd  // undefined = no cost data (codex / unset)
+  const win = ctxWindow(usage, model, engine)
+  // Task 1.5：上下文「已用」基准优先用 contextTokens（含 cache creation + cache read = 真实占用），
+  // 回落 inputTokens（旧路径，无 cache 时等价）。
+  // Issue 10：本轮进行中（liveTokens 有值）时叠加实时输出估算（output 也占窗口）。
+  const ctxBase = usage?.contextTokens ?? inputTokens
   const live = liveTokens != null
   const liveOut = live ? Math.max(outputTokens, liveTokens) : outputTokens
-  const usedTokens = inputTokens + (live ? Math.max(0, liveTokens - outputTokens) : 0)
+  const usedTokens = ctxBase + (live ? Math.max(0, liveTokens - outputTokens) : 0)
   const pct = ctxPercent(usedTokens, win)
 
   return (
@@ -169,10 +175,12 @@ export function CtxMeter({ usage, model, liveTokens }: CtxMeterProps) {
             <span>输出{live && liveOut > outputTokens ? ' (估算)' : ''}</span>
             <b>{fmtTokens(liveOut)}</b>
           </div>
-          <div className="ctx-row">
-            <span>费用</span>
-            <b>{fmtCost(costUsd)}</b>
-          </div>
+          {costUsd !== undefined && (
+            <div className="ctx-row">
+              <span>费用</span>
+              <b>{fmtCost(costUsd)}</b>
+            </div>
+          )}
         </div>
 
         {/* 上下文用量：窗口取真实 contextWindow（按模型缓存），运行中叠加实时输出估算 */}

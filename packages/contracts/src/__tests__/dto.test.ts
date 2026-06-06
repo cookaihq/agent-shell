@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { CreateProjectReq, CreateProjectRes, CreateSessionReq, CreateSessionRes, SubmitMessageReq, ResumeReq, ApiError } from '../dto'
+import { CreateProviderReq, UpdateProviderReq, SetActiveProviderReq, ProviderKeyEnv } from '../dto'
 
 describe('dto', () => {
   it('CreateSessionReq 绑定 projectId/engine/model，title 可选', () => {
@@ -31,5 +32,26 @@ describe('dto', () => {
 
   it('ApiError 形状不变', () => {
     expect(ApiError.parse({ error: { code: 'x', message: 'y' } })).toMatchObject({ error: { code: 'x' } })
+  })
+})
+
+describe('provider dto', () => {
+  it('ProviderKeyEnv 仅 api_key / auth_token', () => {
+    expect(ProviderKeyEnv.parse('auth_token')).toBe('auth_token')
+    expect(() => ProviderKeyEnv.parse('bearer')).toThrow()
+  })
+  it('CreateProviderReq 必填 engine/name/baseUrl/apiKey；keyEnv 默认 api_key', () => {
+    expect(CreateProviderReq.parse({ engine: 'claude', name: '中转', baseUrl: 'https://x', apiKey: 'sk-1' }))
+      .toMatchObject({ keyEnv: 'api_key' })
+    expect(() => CreateProviderReq.parse({ engine: 'claude', name: '中转', apiKey: 'sk-1' })).toThrow()
+  })
+  it('SetActiveProviderReq 绑定 engine + providerId', () => {
+    expect(SetActiveProviderReq.parse({ engine: 'claude', providerId: 'default' }))
+      .toEqual({ engine: 'claude', providerId: 'default' })
+  })
+  it('UpdateProviderReq: apiKey 省略/空串均通过，name 空串被拒', () => {
+    expect(() => UpdateProviderReq.parse({})).not.toThrow()
+    expect(() => UpdateProviderReq.parse({ apiKey: '' })).not.toThrow()
+    expect(() => UpdateProviderReq.parse({ name: '' })).toThrow()
   })
 })

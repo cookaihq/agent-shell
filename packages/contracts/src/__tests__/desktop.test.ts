@@ -10,6 +10,8 @@ describe('desktop 桥契约常量', () => {
     expect(DESKTOP_IPC.tabsSet).toBe('agent-shell:tabs-set')
     expect(DESKTOP_IPC.openPath).toBe('agent-shell:open-path')
     expect(DESKTOP_IPC.openExternal).toBe('agent-shell:open-external')
+    expect(DESKTOP_IPC.trashItem).toBe('agent-shell:trash-item')
+    expect(DESKTOP_IPC.showItemInFolder).toBe('agent-shell:show-item')
   })
   it('鉴权头名小写、错误码稳定', () => {
     expect(AUTH_HEADER).toBe('x-agent-shell-token')

@@ -35,6 +35,10 @@ describe('parseClaudeLine', () => {
     }
   })
 
+  it('system compact_boundary → context_compacted（压缩边界）', () => {
+    expect(parseClaudeLine('{"type":"system","subtype":"compact_boundary"}')).toEqual([{ type: 'context_compacted' }])
+  })
+
   it('坏帧（非法 JSON / 未知事件）返回空数组，不抛', () => {
     expect(parseClaudeLine('not json')).toEqual([])
     expect(parseClaudeLine('{"type":"system","subtype":"init"}')).toEqual([])
@@ -79,6 +83,16 @@ describe('parseClaudeLine', () => {
   it('result is_error 但无 result 文本 → detail 退回 subtype', () => {
     const ev = parseClaudeLine('{"type":"result","subtype":"error_max_turns","is_error":true,"usage":{"input_tokens":1,"output_tokens":0}}')
     expect(ev[1]).toMatchObject({ type: 'turn_end', stopReason: 'failed', detail: 'error_max_turns' })
+  })
+
+  it('error_during_execution 无 result → detail 取 errors[]+terminal_reason（SDKResultError 真因不再被吞）', () => {
+    const ev = parseClaudeLine('{"type":"result","subtype":"error_during_execution","is_error":true,"terminal_reason":"prompt_too_long","errors":["context length exceeded","retry failed"],"usage":{"input_tokens":1,"output_tokens":0}}')
+    expect(ev[1]).toMatchObject({ type: 'turn_end', stopReason: 'failed', detail: 'prompt_too_long: context length exceeded; retry failed' })
+  })
+
+  it('error_during_execution 无 result/errors 但有 terminal_reason → detail 取 terminal_reason（比 subtype 更具体）', () => {
+    const ev = parseClaudeLine('{"type":"result","subtype":"error_during_execution","is_error":true,"terminal_reason":"model_error","errors":[],"usage":{"input_tokens":1,"output_tokens":0}}')
+    expect(ev[1]).toMatchObject({ type: 'turn_end', stopReason: 'failed', detail: 'model_error' })
   })
 
   it('#6 result.modelUsage → usage.contextWindow 取最大（权威窗口替占位）', () => {
@@ -260,6 +274,39 @@ describe('createClaudeObjectParser（SDK 消息对象级解析）', () => {
     const parse = createClaudeObjectParser()
     const out = parse({ type: 'assistant', message: { content: [{ type: 'thinking', thinking: '完整思考' }] } })
     expect(out).toEqual([{ type: 'thinking', text: '完整思考' }])
+  })
+
+  it('result usage 带 contextTokens（含 cache，跨 assistant max 合并）+ authoritative', () => {
+    const parse = createClaudeObjectParser()
+    // 两条 assistant 带 cache_* usage：逐字段 max 合并（对齐 Claudian mergePromptUsage）
+    parse({ type: 'assistant', message: { content: [], usage: { input_tokens: 6146, cache_creation_input_tokens: 6774, cache_read_input_tokens: 16709 } } })
+    parse({ type: 'assistant', message: { content: [], usage: { input_tokens: 2, cache_creation_input_tokens: 6286, cache_read_input_tokens: 23483 } } })
+    const out = parse({ type: 'result', usage: { input_tokens: 6148, output_tokens: 132 }, modelUsage: { 'claude-opus': { contextWindow: 200000 } } })
+    const usage = out.find((e) => e.type === 'usage') as any
+    // max：input=max(6146,2)=6146, cacheCreation=max(6774,6286)=6774, cacheRead=max(16709,23483)=23483
+    expect(usage.contextTokens).toBe(6146 + 6774 + 23483)
+    expect(usage.contextWindow).toBe(200000)
+    expect(usage.contextWindowIsAuthoritative).toBe(true)
+  })
+
+  it('result 无 contextWindow → authoritative=false（仍出 contextTokens）', () => {
+    const parse = createClaudeObjectParser()
+    parse({ type: 'assistant', message: { content: [], usage: { input_tokens: 100, cache_read_input_tokens: 50 } } })
+    const out = parse({ type: 'result', usage: { input_tokens: 100, output_tokens: 5 } })
+    const usage = out.find((e) => e.type === 'usage') as any
+    expect(usage.contextTokens).toBe(150)
+    expect(usage.contextWindowIsAuthoritative).toBe(false)
+  })
+
+  it('累计器在 result 后重置：下一轮 contextTokens 不累加上一轮', () => {
+    const parse = createClaudeObjectParser()
+    parse({ type: 'assistant', message: { content: [], usage: { input_tokens: 1000, cache_read_input_tokens: 500 } } })
+    parse({ type: 'result', usage: { input_tokens: 1000, output_tokens: 1 } })
+    // 第二轮：小 prompt
+    parse({ type: 'assistant', message: { content: [], usage: { input_tokens: 10, cache_read_input_tokens: 5 } } })
+    const out = parse({ type: 'result', usage: { input_tokens: 10, output_tokens: 1 } })
+    const usage = out.find((e) => e.type === 'usage') as any
+    expect(usage.contextTokens).toBe(15)   // 不含上一轮 1500
   })
 })
 

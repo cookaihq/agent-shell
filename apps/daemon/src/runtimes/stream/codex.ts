@@ -11,8 +11,9 @@ export function parseCodexLine(line: string): AgentEvent[] {
     case 'item.started': {
       const it = o.item
       if (it?.type === 'command_execution') {
-        // codex 的 command_execution 无工具名；'shell' 是归一常量，真实命令保留在 input.command
-        emit(out, { type: 'tool_use', id: it.id, name: 'shell', input: { command: it.command } })
+        // codex 的 command_execution 无工具名；'shell' 是归一常量，真实命令保留在 input.command；
+        // tool:'bash' 是中立种类，renderer 按它渲染（不依赖 kindOf('shell')，隔离 Agent 原生名）。
+        emit(out, { type: 'tool_use', id: it.id, name: 'shell', input: { command: it.command }, tool: 'bash' })
       }
       break
     }

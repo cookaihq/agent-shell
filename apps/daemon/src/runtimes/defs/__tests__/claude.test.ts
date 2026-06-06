@@ -8,7 +8,7 @@ describe('claudeDef', () => {
     expect(claudeDef.promptInputFormat).toBe('stream-json')
     expect(claudeDef.closeStdinAfterPrompt).toBe(false)
     expect(claudeDef.turnBoundary).toBe('event')
-    expect(claudeDef.authStrategy).toEqual({ apiKeyEnv: 'ANTHROPIC_API_KEY', baseUrlEnv: 'ANTHROPIC_BASE_URL' })
+    expect(claudeDef.authStrategy).toEqual({ apiKeyEnv: 'ANTHROPIC_API_KEY', baseUrlEnv: 'ANTHROPIC_BASE_URL', altKeyEnv: 'ANTHROPIC_AUTH_TOKEN' })
   })
 
   it('buildArgs：stream-json 进出 + verbose + model + 写死 bypassPermissions', () => {

@@ -3,11 +3,19 @@
 //   · 视图（phase）是"路由"，每次视图变就把页签列表与之对账（syncTabsToView）；导航到首页只激活首页页签、
 //     不动其它页签；打开项目则在首页页签旁【追加】项目页签，不替换——所以"返回"永不关页签，× 才关
 //   · 项目页签只存 projectId，标题由调用方按 id 查 live projects（改名自动同步，无快照）
-// agent-shell 裁剪：只有 home（singleton）+ project 两类；砍掉 open-design 的 marketplace/搜索/悬停预览。
+// agent-shell 裁剪：四个 entry 单例页签（home/projects/automations/integrations）+ project 多实例；
+// 砍掉 open-design 的 marketplace/搜索/悬停预览。
 import type { AgentShellBridge } from '@agent-shell/contracts'
 
+/** 四个 entry 页各自一个单例页签（结构同 home）；project 是多实例。 */
+export type EntryKind = 'home' | 'projects' | 'automations' | 'integrations'
+const ENTRY_KINDS: readonly EntryKind[] = ['home', 'projects', 'automations', 'integrations']
+function isEntryKind(k: unknown): k is EntryKind {
+  return typeof k === 'string' && (ENTRY_KINDS as readonly string[]).includes(k)
+}
+
 export type ChromeTab =
-  | { id: string; kind: 'home'; createdAt: number; lastActiveAt: number }
+  | { id: string; kind: EntryKind; createdAt: number; lastActiveAt: number }
   | { id: string; kind: 'project'; projectId: string; createdAt: number; lastActiveAt: number }
 
 export interface TabsState {
@@ -15,8 +23,10 @@ export interface TabsState {
   activeTabId: string
 }
 
-/** 当前视图（= phase 的精简投影）：首页/项目列表都归到 home 页签；workspace 是某项目页签。 */
-export type TabView = { kind: 'home' } | { kind: 'project'; projectId: string }
+/** 当前视图（= phase 的精简投影）：每个 entry 页一个单例视图；workspace 是某项目页签。 */
+export type TabView =
+  | { kind: EntryKind }
+  | { kind: 'project'; projectId: string }
 
 const STORAGE_KEY = 'agent-shell:workspace-tabs:v1'
 
@@ -26,27 +36,33 @@ function newId(prefix: string, now: number): string {
   return `${prefix}:${now.toString(36)}-${(seq++).toString(36)}`
 }
 
+/** 泛化的 entry 单例页签工厂（仿原 homeTab，避免四份重复）。 */
+export function entryTab(kind: EntryKind, now: number): ChromeTab {
+  return { id: newId(kind, now), kind, createdAt: now, lastActiveAt: now }
+}
 export function homeTab(now: number): ChromeTab {
-  return { id: newId('home', now), kind: 'home', createdAt: now, lastActiveAt: now }
+  return entryTab('home', now)
 }
 export function projectTab(projectId: string, now: number): ChromeTab {
   return { id: newId(`project:${projectId}`, now), kind: 'project', projectId, createdAt: now, lastActiveAt: now }
 }
 
 function tabForView(view: TabView, now: number): ChromeTab {
-  return view.kind === 'project' ? projectTab(view.projectId, now) : homeTab(now)
+  return view.kind === 'project' ? projectTab(view.projectId, now) : entryTab(view.kind, now)
 }
 
-/** 保证：至少一个页签、home 唯一（singleton，多余的合并）、activeTabId 有效。 */
+/** 保证：至少一个页签、每个 entry 单例 kind 唯一（多余的合并）、activeTabId 有效。 */
 export function normalizeTabs(state: TabsState): TabsState {
   let tabs = state.tabs.length > 0 ? state.tabs : [homeTab(0)]
-  // home 去重：保留 active 的那个，否则 lastActiveAt 最大的
-  const homes = tabs.filter((t) => t.kind === 'home')
-  if (homes.length > 1) {
-    const keep =
-      homes.find((t) => t.id === state.activeTabId) ??
-      homes.reduce((a, b) => (b.lastActiveAt > a.lastActiveAt ? b : a), homes[0])
-    tabs = tabs.filter((t) => t.kind !== 'home' || t.id === keep.id)
+  // 每个单例 entry kind 各自去重：保留 active 的那个，否则 lastActiveAt 最大的
+  for (const kind of ENTRY_KINDS) {
+    const same = tabs.filter((t) => t.kind === kind)
+    if (same.length > 1) {
+      const keep =
+        same.find((t) => t.id === state.activeTabId) ??
+        same.reduce((a, b) => (b.lastActiveAt > a.lastActiveAt ? b : a), same[0])
+      tabs = tabs.filter((t) => t.kind !== kind || t.id === keep.id)
+    }
   }
   const activeTabId = tabs.some((t) => t.id === state.activeTabId) ? state.activeTabId : tabs[0].id
   return { tabs, activeTabId }
@@ -54,23 +70,23 @@ export function normalizeTabs(state: TabsState): TabsState {
 
 /**
  * 把页签状态与当前视图对账（对齐 open-design syncStateToRoute）：
- *  - home 视图：激活已有 home 页签（没有则追加），其它页签原样
- *  - project 视图：该项目页签已存在 → 激活；否则当前激活的是 home → 【追加】项目页签（不替换 home）；
- *    否则替换当前激活页签（在某项目里直接打开另一个项目 → 复用当前页签位）
+ *  - 任意 entry 单例视图（home/projects/automations/integrations）：激活已有同 kind 页签（没有则追加），其它页签原样
+ *  - project 视图：该项目页签已存在 → 激活；否则当前激活的是【任意 entry 单例】→ 【追加】项目页签（不替换该 entry）；
+ *    否则（active 是另一个 project）替换当前激活页签（在某项目里直接打开另一个项目 → 复用当前页签位）
  */
 export function syncTabsToView(state: TabsState, view: TabView, now: number): TabsState {
   const cur = normalizeTabs(state)
   const active = cur.tabs.find((t) => t.id === cur.activeTabId) ?? null
 
-  if (view.kind === 'home') {
-    const home = cur.tabs.find((t) => t.kind === 'home')
-    if (home) {
+  if (view.kind !== 'project') {
+    const entry = cur.tabs.find((t) => t.kind === view.kind)
+    if (entry) {
       return normalizeTabs({
-        tabs: cur.tabs.map((t) => (t.id === home.id ? { ...t, lastActiveAt: now } : t)),
-        activeTabId: home.id,
+        tabs: cur.tabs.map((t) => (t.id === entry.id ? { ...t, lastActiveAt: now } : t)),
+        activeTabId: entry.id,
       })
     }
-    const t = homeTab(now)
+    const t = entryTab(view.kind, now)
     return normalizeTabs({ tabs: [...cur.tabs, t], activeTabId: t.id })
   }
 
@@ -82,11 +98,8 @@ export function syncTabsToView(state: TabsState, view: TabView, now: number): Ta
       activeTabId: existing.id,
     })
   }
-  if (active && active.kind === 'home') {
-    const t = projectTab(view.projectId, now)
-    return normalizeTabs({ tabs: [...cur.tabs, t], activeTabId: t.id })
-  }
-  if (!active) {
+  // 当前 active 是任意 entry 单例（或无 active）→ 追加项目页签（保留 entry 页签，不替换）
+  if (!active || isEntryKind(active.kind)) {
     const t = projectTab(view.projectId, now)
     return normalizeTabs({ tabs: [...cur.tabs, t], activeTabId: t.id })
   }
@@ -97,7 +110,7 @@ export function syncTabsToView(state: TabsState, view: TabView, now: number): Ta
 
 /** 视图归属：某 tab 对应哪个视图（点页签时导航到它）。 */
 export function viewForTab(tab: ChromeTab): TabView {
-  return tab.kind === 'project' ? { kind: 'project', projectId: tab.projectId } : { kind: 'home' }
+  return tab.kind === 'project' ? { kind: 'project', projectId: tab.projectId } : { kind: tab.kind }
 }
 
 /**
@@ -151,7 +164,7 @@ function reviveTab(v: unknown): ChromeTab | null {
   if (!id) return null
   const createdAt = typeof r.createdAt === 'number' ? r.createdAt : 0
   const lastActiveAt = typeof r.lastActiveAt === 'number' ? r.lastActiveAt : createdAt
-  if (r.kind === 'home') return { id, kind: 'home', createdAt, lastActiveAt }
+  if (isEntryKind(r.kind)) return { id, kind: r.kind, createdAt, lastActiveAt }
   if (r.kind === 'project' && typeof r.projectId === 'string') {
     return { id, kind: 'project', projectId: r.projectId, createdAt, lastActiveAt }
   }

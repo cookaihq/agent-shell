@@ -79,8 +79,9 @@ export function MentionPop({ open, items, activeIndex, onChoose }: MentionPopPro
     )
   })
 
+  const isCmd = items.length > 0 && items[0].icon === 'cmd'
   return (
-    <div className="mention-pop" hidden={!open}>
+    <div className={`mention-pop${isCmd ? ' is-cmd' : ''}`} hidden={!open}>
       {rows}
     </div>
   )

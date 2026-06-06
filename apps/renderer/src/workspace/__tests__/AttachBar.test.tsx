@@ -37,4 +37,36 @@ describe('AttachBar', () => {
     const { container } = render(<AttachBar attachments={[fileChip, dirChip]} onRemove={vi.fn()} />)
     expect(container.querySelectorAll('.attach-chip').length).toBe(2)
   })
+
+  it('带 previewUrl 的图片渲染缩略图 ac-thumb（而非 ac-ic 图标）', () => {
+    const imgChip: AttachChip = { name: 'shot.png', kind: 'file', previewUrl: 'blob:fake-url' }
+    const { container } = render(<AttachBar attachments={[imgChip]} onRemove={vi.fn()} />)
+    const thumb = container.querySelector('img.ac-thumb') as HTMLImageElement | null
+    expect(thumb).toBeTruthy()
+    expect(thumb?.getAttribute('src')).toBe('blob:fake-url')
+    expect(container.querySelector('.ac-ic')).toBeNull()
+  })
+
+  it('点击图片缩略图打开 lightbox 大图，点关闭按钮收起', () => {
+    const imgChip: AttachChip = { name: 'shot.png', kind: 'file', previewUrl: 'blob:fake-url' }
+    const { container } = render(<AttachBar attachments={[imgChip]} onRemove={vi.fn()} />)
+    expect(screen.queryByRole('dialog')).toBeNull()
+
+    fireEvent.click(container.querySelector('.ac-view') as Element)
+    const dialog = screen.getByRole('dialog')
+    expect(dialog).toBeInTheDocument()
+    expect((dialog.querySelector('img.acl-img') as HTMLImageElement).getAttribute('src')).toBe('blob:fake-url')
+
+    fireEvent.click(dialog.querySelector('.acl-close') as Element)
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('lightbox 按 Esc 关闭', () => {
+    const imgChip: AttachChip = { name: 'shot.png', kind: 'file', previewUrl: 'blob:fake-url' }
+    const { container } = render(<AttachBar attachments={[imgChip]} onRemove={vi.fn()} />)
+    fireEvent.click(container.querySelector('.ac-view') as Element)
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
 })

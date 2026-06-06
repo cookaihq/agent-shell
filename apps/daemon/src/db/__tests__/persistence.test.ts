@@ -5,7 +5,6 @@ import path from 'node:path'
 import { openDatabase } from '../database'
 import { createProject, getProject } from '../projects'
 import { createSession, getSession } from '../sessions'
-import { appendMessage, getMessages } from '../messages'
 import { recordUsage, getUsage } from '../usage'
 
 /** 盘持久化回归网：其余单测都用 :memory:，这里用真文件验证 close→reopen 数据不丢、
@@ -25,7 +24,7 @@ describe('真文件库持久化（close → reopen）', () => {
     expect(fs.existsSync(dbPath)).toBe(true)
   })
 
-  it('写入后关库、重开同一文件 → 项目/会话/消息/用量全部读回', () => {
+  it('写入后关库、重开同一文件 → 项目/会话/用量全部读回', () => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentshell-persist-'))
     const dbPath = path.join(dir, 'app.sqlite')
 
@@ -33,7 +32,6 @@ describe('真文件库持久化（close → reopen）', () => {
     let db = openDatabase(dbPath)
     const proj = createProject(db, { name: '持久化测试', path: '/p' })
     const s = createSession(db, { projectId: proj.id, engine: 'codex', model: 'gpt-5.5', title: '初稿' })
-    appendMessage(db, { sessionId: s.id, role: 'user', blocks: [{ type: 'text', text: '落盘了吗' }] })
     recordUsage(db, { sessionId: s.id, turn: 1, inputTokens: 10, outputTokens: 3, costUsd: 0.001 })
     db.close()
 
@@ -42,7 +40,6 @@ describe('真文件库持久化（close → reopen）', () => {
     try {
       expect(getProject(db, proj.id)).toMatchObject({ id: proj.id, name: '持久化测试', path: '/p' })
       expect(getSession(db, s.id)).toMatchObject({ id: s.id, projectId: proj.id, engine: 'codex', title: '初稿' })
-      expect(getMessages(db, s.id)[0].blocks).toEqual([{ type: 'text', text: '落盘了吗' }])
       expect(getUsage(db, s.id)[0]).toMatchObject({ turn: 1, inputTokens: 10, outputTokens: 3, costUsd: 0.001 })
     } finally {
       db.close()

@@ -13,8 +13,17 @@
  *   - 点文件：所有节点 is-active 清空 → 当前节点 is-active + onOpen(path)
  */
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import type { FileNode } from '../api/types'
+import { RenameInput, type RenameCtx } from './RenameInput'
+
+/** 内部拖拽移动上下文（§5.6）：begin=拖起设标记、canDrop=能否放进 destDir、drop=落点移动；mime 用于区分内/外拖拽。 */
+export interface TreeDnd {
+  mime: string
+  begin: (paths: string[], e: React.DragEvent) => void
+  canDrop: (destDir: string) => boolean
+  drop: (destDir: string, e: React.DragEvent) => void
+}
 
 // ── SVG 图标 ──────────────────────────────────────────────────────────────────
 
@@ -96,16 +105,23 @@ interface TreeNodeProps {
   activeNodePath: string | null
   onActivate: (path: string, isFolder: boolean) => void
   onOpen: (path: string) => void
+  /** 右键节点：上报给容器构造菜单（节点本身，不在树内多选）。 */
+  onContext?: (node: FileNode, e: React.MouseEvent) => void
+  /** 内联重命名上下文（命中本节点 path 时把名字换成输入框）。 */
+  rename?: RenameCtx
+  /** 内部拖拽移动上下文（节点作拖源；文件夹作放置目标）。 */
+  dnd?: TreeDnd
 }
 
-// 注入/系统目录（dot 目录，如 .claude / .superpowers）默认折叠，避免注入技能把深层目录全展开（Issue 6）；
-// 用户自己的内容目录（非 dot）仍默认展开。
+// 所有文件夹默认折叠，逐个点开（用户要求，feedback-2 Issue 7）。
+// dot 目录（如 .claude / .superpowers）同样折叠，与新策略一致。
 function defaultCollapsed(node: FileNode): boolean {
-  return node.type === 'dir' && node.name.startsWith('.')
+  return node.type === 'dir'
 }
 
-function TreeNode({ node, depth, activeNodePath, onActivate, onOpen }: TreeNodeProps) {
+function TreeNode({ node, depth, activeNodePath, onActivate, onOpen, onContext, rename, dnd }: TreeNodeProps) {
   const [collapsed, setCollapsed] = useState(() => defaultCollapsed(node))
+  const [dropTarget, setDropTarget] = useState(false)
 
   const isFolder = node.type === 'dir'
   const isActive = activeNodePath === node.path
@@ -119,12 +135,27 @@ function TreeNode({ node, depth, activeNodePath, onActivate, onOpen }: TreeNodeP
     }
   }
 
+  // 文件夹作放置目标：仅对内部拖拽（dataTransfer 带本应用 MIME）且不放进自身/子孙时高亮并允许 drop。
+  const onDragOver = (e: React.DragEvent) => {
+    if (!dnd || !isFolder) return
+    if (!e.dataTransfer.types.includes(dnd.mime) || !dnd.canDrop(node.path)) return
+    e.preventDefault(); e.stopPropagation()
+    e.dataTransfer.dropEffect = 'move'
+    if (!dropTarget) setDropTarget(true)
+  }
+
   return (
     <>
       <div
-        className={`fb-tnode${isFolder ? ' is-folder' : ''}${collapsed ? ' collapsed' : ''}${isActive ? ' is-active' : ''}`}
+        className={`fb-tnode${isFolder ? ' is-folder' : ''}${collapsed ? ' collapsed' : ''}${isActive ? ' is-active' : ''}${dropTarget ? ' is-droptarget' : ''}`}
         data-depth={depth}
+        draggable={!!dnd && rename?.path !== node.path}
         onClick={handleClick}
+        onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); onContext?.(node, e) }}
+        onDragStart={(e) => { e.stopPropagation(); dnd?.begin([node.path], e) }}
+        onDragOver={onDragOver}
+        onDragLeave={() => { if (dropTarget) setDropTarget(false) }}
+        onDrop={(e) => { if (!dnd || !isFolder) return; e.stopPropagation(); setDropTarget(false); dnd.drop(node.path, e) }}
       >
         <span className="caret">{isFolder ? <ChevronIcon /> : null}</span>
         {isFolder ? (
@@ -132,7 +163,11 @@ function TreeNode({ node, depth, activeNodePath, onActivate, onOpen }: TreeNodeP
         ) : (
           <span className="ti tf">{fileTag(node.name)}</span>
         )}
-        <span className="tname">{node.name}</span>
+        {rename?.path === node.path ? (
+          <RenameInput name={node.name} onSubmit={(n) => rename.submit(node.path, n)} onCancel={rename.cancel} />
+        ) : (
+          <span className="tname">{node.name}</span>
+        )}
         {node.symlink && (
           <span className="tlink-wrap" title="符号链接（symlink）">
             <SymlinkBadge />
@@ -149,6 +184,9 @@ function TreeNode({ node, depth, activeNodePath, onActivate, onOpen }: TreeNodeP
               activeNodePath={activeNodePath}
               onActivate={onActivate}
               onOpen={onOpen}
+              onContext={onContext}
+              rename={rename}
+              dnd={dnd}
             />
           ))}
         </div>
@@ -175,9 +213,17 @@ interface FileTreeProps {
   onSelectDir?: (dir: string) => void
   /** 新建文件/目录（Issue 15）：name 为名字，落点由 onSelectDir 维护在父层 */
   onCreate?: (name: string, kind: 'file' | 'dir') => void
+  /** 右键节点（文件/文件夹）；node=null 表示右键树空白区。容器据此构造菜单。 */
+  onContext?: (node: FileNode | null, e: React.MouseEvent) => void
+  /** 内联重命名上下文（source==='tree' 时由容器下发）。 */
+  rename?: RenameCtx
+  /** 「在此新建」信号：seq 变化即进入内联新建态（落点由容器先 setSelectedDir 决定）。 */
+  createReq?: { kind: 'file' | 'dir'; seq: number }
+  /** 内部拖拽移动上下文（§5.6）。 */
+  dnd?: TreeDnd
 }
 
-export function FileTree({ nodes, onOpen, onRefresh, onSelectDir, onCreate }: FileTreeProps) {
+export function FileTree({ nodes, onOpen, onRefresh, onSelectDir, onCreate, onContext, rename, createReq, dnd }: FileTreeProps) {
   // 全局 activeNodePath（任何节点被点击时高亮，文件夹点击也高亮）
   const [activeNodePath, setActiveNodePath] = useState<string | null>(null)
   // 内联新建：'file' / 'dir' / null（点工具栏按钮进入，输入名字回车创建）
@@ -190,6 +236,11 @@ export function FileTree({ nodes, onOpen, onRefresh, onSelectDir, onCreate }: Fi
   }
 
   const startCreate = (kind: 'file' | 'dir') => { setCreating(kind); setDraft('') }
+  // 容器「在此新建」信号 → 进入内联新建态（落点已由容器 setSelectedDir 设好）
+  useEffect(() => {
+    if (createReq) { setCreating(createReq.kind); setDraft('') }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [createReq?.seq])
   const commitCreate = () => {
     const name = draft.trim()
     if (name && creating) onCreate?.(name, creating)
@@ -197,7 +248,7 @@ export function FileTree({ nodes, onOpen, onRefresh, onSelectDir, onCreate }: Fi
   }
 
   return (
-    <div className="fb-tree">
+    <div className="fb-tree" onContextMenu={(e) => { e.preventDefault(); onContext?.(null, e) }}>
       <div className="fb-tree-toolbar">
         <span className="fb-tree-title">资源管理器</span>
         <span className="fb-tree-tools">
@@ -237,6 +288,9 @@ export function FileTree({ nodes, onOpen, onRefresh, onSelectDir, onCreate }: Fi
           activeNodePath={activeNodePath}
           onActivate={handleActivate}
           onOpen={onOpen}
+          onContext={onContext}
+          rename={rename}
+          dnd={dnd}
         />
       ))}
     </div>

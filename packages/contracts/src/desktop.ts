@@ -17,6 +17,10 @@ export const DESKTOP_IPC = {
   openPath: 'agent-shell:open-path',
   /** ipcRenderer.invoke：在系统默认浏览器打开外部 https URL（shell.openExternal），返回 {ok,error}。主进程限定仅放行 https。 */
   openExternal: 'agent-shell:open-external',
+  /** ipcRenderer.invoke：把一组绝对路径移到系统废纸篓（shell.trashItem 逐个），返回 {ok, failed[]}。 */
+  trashItem: 'agent-shell:trash-item',
+  /** ipcRenderer.invoke：在系统文件管理器（Finder）中定位并选中某绝对路径（shell.showItemInFolder），返回 {ok,error}。 */
+  showItemInFolder: 'agent-shell:show-item',
 } as const
 
 /** 宽门会话 token 的请求头名（小写，便于 Express req.header 大小写无关读取）。 */
@@ -41,4 +45,8 @@ export interface AgentShellBridge {
   openPath: (absPath: string) => Promise<{ ok: boolean; error?: string }>
   /** 在系统默认浏览器打开外部 https URL（CLI 更新 → 官方 GitHub 页）。主进程仅放行 https，否则 ok=false。 */
   openExternal: (url: string) => Promise<{ ok: boolean; error?: string }>
+  /** 把一组绝对路径移到系统废纸篓（可恢复）。逐个 try/catch，未删成功的进 failed[]。 */
+  trashItem: (absPaths: string[]) => Promise<{ ok: boolean; failed: string[] }>
+  /** 在系统文件管理器（Finder）中定位并选中某绝对路径。ok=false 时 error 为系统错误信息。 */
+  showItemInFolder: (absPath: string) => Promise<{ ok: boolean; error?: string }>
 }

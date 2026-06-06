@@ -1,0 +1,62 @@
+[
+  {
+    "id": "yt-dlp", "name": "yt-dlp", "cmd": "yt-dlp", "tags": ["下载", "媒体"], "friendliness": 4, "custom": false,
+    "desc": "功能强大的视频下载工具，支持数千个网站。",
+    "install": "brew install yt-dlp", "home": "https://github.com/yt-dlp/yt-dlp",
+    "usage": "下载视频/音频：yt-dlp <url>。常用 -x --audio-format mp3 仅取音频，-f 选清晰度，-o 指定输出名。非交互、输出可解析，很适合 agent。"
+  },
+  {
+    "id": "ffmpeg", "name": "FFmpeg", "cmd": "ffmpeg", "tags": ["媒体"], "friendliness": 5, "custom": false,
+    "desc": "音视频转码与处理的瑞士军刀，转格式、剪辑、抽帧、合并。",
+    "install": "brew install ffmpeg", "home": "https://ffmpeg.org",
+    "usage": "转码/剪辑：ffmpeg -i in.mp4 … out.mp4。-ss/-t 截取片段，-vf 加滤镜。全程非交互、参数明确。"
+  },
+  {
+    "id": "imagemagick", "name": "ImageMagick", "cmd": "magick", "tags": ["媒体"], "friendliness": 5, "custom": false,
+    "desc": "强大的图片处理工具，支持格式转换、缩放、裁剪、特效。",
+    "install": "brew install imagemagick", "home": "https://imagemagick.org",
+    "usage": "图片处理：magick in.png -resize 50% out.jpg；批处理用 mogrify。命令式、可批量，agent 友好。"
+  },
+  {
+    "id": "gh", "name": "GitHub CLI", "cmd": "gh", "tags": ["开发"], "friendliness": 5, "custom": false,
+    "desc": "GitHub 官方命令行，管理 PR / issue / release / 仓库。",
+    "install": "brew install gh", "home": "https://cli.github.com",
+    "usage": "gh pr create / gh issue list / gh repo clone。需先 gh auth login，输出可 --json 解析。"
+  },
+  {
+    "id": "gworkspace", "name": "Google Workspace CLI", "cmd": "gworkspace", "tags": ["效率"], "friendliness": 4, "custom": false,
+    "desc": "Google Workspace 命令行工具，支持 Drive / Gmail / Calendar / Sheets 等 API 操作。",
+    "install": "npm i -g @google/workspace-cli", "home": "https://developers.google.com/workspace",
+    "usage": "读写 Drive/Gmail/Calendar/Sheets。OAuth 授权一次后可非交互调用。"
+  },
+  {
+    "id": "stripe", "name": "Stripe CLI", "cmd": "stripe", "tags": ["效率", "开发"], "friendliness": 2, "custom": false,
+    "desc": "支付集成命令行工具，支持资源管理、Webhook 调试、日志监控。",
+    "install": "brew install stripe/stripe-cli/stripe", "home": "https://stripe.com/docs/stripe-cli",
+    "usage": "stripe listen 转发 webhook；stripe trigger 造测试事件。部分命令需登录且交互，agent 友好度一般。"
+  },
+  {
+    "id": "elevenlabs", "name": "ElevenLabs CLI", "cmd": "elevenlabs", "tags": ["媒体", "效率"], "friendliness": 2, "custom": false,
+    "desc": "AI 语音代理管理工具，支持创建、配置、部署语音代理。",
+    "install": "npm i -g elevenlabs-cli", "home": "https://elevenlabs.io",
+    "usage": "文本转语音、管理语音代理。需 API Key 环境变量。"
+  },
+  {
+    "id": "lark", "name": "飞书 Lark CLI", "cmd": "lark", "tags": ["效率"], "friendliness": 3, "custom": false,
+    "desc": "飞书开放平台命令行工具，覆盖消息、文档、多维表格、日历、邮箱等 200+ 命令。",
+    "install": "npm i -g @larksuite/lark-cli", "home": "https://open.feishu.cn",
+    "usage": "发消息、读写多维表格/文档/日历。需配置应用凭证。命令多、结构化，较适合 agent。"
+  },
+  {
+    "id": "netease", "name": "网易云音乐 CLI", "cmd": "ncm", "tags": ["媒体"], "friendliness": 2, "custom": false,
+    "desc": "网易云音乐命令行播放器，支持搜索、播放、歌单管理，专为 AI Agent 设计。",
+    "install": "npm i -g NeteaseCloudMusicApi", "home": "https://github.com/Binaryify/NeteaseCloudMusicApi",
+    "usage": "搜索、播放、管理歌单。搜索/歌单为可解析输出，播放为本机进程。"
+  },
+  {
+    "id": "dreamina", "name": "即梦 Dreamina CLI", "cmd": "dreamina", "tags": ["媒体"], "friendliness": 2, "custom": false,
+    "desc": "即梦 AI 创作工具包，支持文生图、文生视频、图生图、图生视频。",
+    "install": "npm i -g dreamina-cli", "home": "https://dreamina.com",
+    "usage": "文生图/视频、图生图/视频。生成为异步任务需轮询取结果，需凭证。"
+  }
+]

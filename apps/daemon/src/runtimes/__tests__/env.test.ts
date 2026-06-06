@@ -29,4 +29,31 @@ describe('sanitizeEnv', () => {
     sanitizeEnv(claudeAuth, base)
     expect(base.ANTHROPIC_API_KEY).toBe('sk-x')
   })
+
+  const CLAUDE = { apiKeyEnv: 'ANTHROPIC_API_KEY', baseUrlEnv: 'ANTHROPIC_BASE_URL', altKeyEnv: 'ANTHROPIC_AUTH_TOKEN' }
+
+  it('默认剥除 api/auth/base 三个变量（外部不渗入）', () => {
+    const env = sanitizeEnv(CLAUDE, { ANTHROPIC_API_KEY: 'x', ANTHROPIC_AUTH_TOKEN: 'y', ANTHROPIC_BASE_URL: 'z', PATH: '/usr/bin' })
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined()
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined()
+    expect(env.ANTHROPIC_BASE_URL).toBeUndefined()
+    expect(env.PATH).toBe('/usr/bin')
+  })
+  it('keyEnv=auth_token → 注入 ANTHROPIC_AUTH_TOKEN，不写 API_KEY', () => {
+    const env = sanitizeEnv(CLAUDE, {}, { baseUrl: 'https://relay', apiKey: 'sk-1', keyEnv: 'auth_token' })
+    expect(env.ANTHROPIC_BASE_URL).toBe('https://relay')
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBe('sk-1')
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined()
+  })
+  it('keyEnv=api_key（默认）→ 注入 ANTHROPIC_API_KEY', () => {
+    const env = sanitizeEnv(CLAUDE, {}, { baseUrl: 'https://relay', apiKey: 'sk-1' })
+    expect(env.ANTHROPIC_API_KEY).toBe('sk-1')
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined()
+  })
+  it('keyEnv=auth_token 但 authStrategy 无 altKeyEnv → 回落注入 apiKeyEnv', () => {
+    const noAlt = { apiKeyEnv: 'ANTHROPIC_API_KEY', baseUrlEnv: 'ANTHROPIC_BASE_URL' }
+    const env = sanitizeEnv(noAlt, {}, { baseUrl: 'https://relay', apiKey: 'sk-1', keyEnv: 'auth_token' })
+    expect(env.ANTHROPIC_API_KEY).toBe('sk-1')
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined()
+  })
 })

@@ -11,13 +11,21 @@ import { Rail } from '../shell/Rail'
 import { Topbar } from '../shell/Topbar'
 import { Home, type HomeAttachment } from '../entry/Home'
 import { Projects } from '../entry/Projects'
+import { Integrations } from '../entry/Integrations'
+import { TaskAutomation } from '../automation/TaskAutomation'
 import { SkillModal } from '../entry/SkillModal'
 import { NewProjectModal } from '../shell/NewProjectModal'
 import { Workspace } from '../workspace/Workspace'
+import { applySessionRuntime, type SessionRuntimeCfg } from '../workspace/sessionRuntimeSync'
 import { RuntimeContext, useRuntimeReducer, CLI_MODELS } from '../workspace/runtimeState'
 import type { ProjectDTO, SessionDTO, Engine } from '../api/types'
 
 const DEFAULT_MODEL: Record<Engine, string> = { claude: 'opus', codex: 'gpt-5.5' }
+
+// 从持久化 config 中取引擎默认模型，回落到 DEFAULT_MODEL
+function seedModel(engine: Engine, engineModels: Record<string, string>): string {
+  return engineModels[engine] ?? DEFAULT_MODEL[engine]
+}
 
 // 进项目记住上次打开的会话（Issue 28）：按项目存最近活动会话 id。
 const LAST_SESSION_KEY = 'agent-shell:last-session'
@@ -37,6 +45,8 @@ type Phase =
   | { tag: 'no-cli' }
   | { tag: 'home' }
   | { tag: 'projects' }
+  | { tag: 'integrations' }
+  | { tag: 'automations' }
   | { tag: 'workspace'; project: ProjectDTO; session: SessionDTO; sessions: SessionDTO[]; initialMessage?: string; initialContextFiles?: string[] }
 
 export function AppNav() {
@@ -49,6 +59,8 @@ export function AppNav() {
   const [openSessionIds, setOpenSessionIds] = useState<string[]>([])
   // home runtime（Topbar 切换器 + 发送建会话用）
   const [runtime, rtDispatch] = useRuntimeReducer('claude', CLI_MODELS.claude[0].value)
+  // 持久化的每引擎默认模型（来自 config.json engineModels）；新建会话用它作 model，回落 DEFAULT_MODEL
+  const [engineModels, setEngineModels] = useState<Record<string, string>>({})
 
   // 顶部页签：独立持久状态（localStorage），与 phase 解耦——phase 当"路由"，每次变就把页签列表与之对账。
   const [tabs, setTabs] = useState<TabsState>(() => loadTabs(Date.now()))
@@ -59,12 +71,15 @@ export function AppNav() {
     const a = tabs.tabs.find((t) => t.id === tabs.activeTabId)
     bootProjectId.current = a && a.kind === 'project' ? a.projectId : ''
   }
-  // phase → tabs 对账：home/projects 归 home 页签，workspace 归该项目页签（返回只激活、不关；× 才关）。
+  // phase → tabs 对账：四个 entry phase 各归自己的单例页签，workspace 归该项目页签（返回只激活、不关；× 才关）。
   useEffect(() => {
     const v: TabView | null =
-      phase.tag === 'home' || phase.tag === 'projects' ? { kind: 'home' }
-        : phase.tag === 'workspace' ? { kind: 'project', projectId: phase.project.id }
-          : null
+      phase.tag === 'home' ? { kind: 'home' }
+        : phase.tag === 'projects' ? { kind: 'projects' }
+          : phase.tag === 'automations' ? { kind: 'automations' }
+            : phase.tag === 'integrations' ? { kind: 'integrations' }
+              : phase.tag === 'workspace' ? { kind: 'project', projectId: phase.project.id }
+                : null
     if (v) setTabs((s) => syncTabsToView(s, v, Date.now()))
   }, [phase])
 
@@ -89,6 +104,11 @@ export function AppNav() {
       if (err instanceof ApiError && err.code === 'cli_not_found') { setPhase({ tag: 'no-cli' }); return }
       setPhase({ tag: 'no-cli' }); return
     }
+    // 加载持久化的每引擎默认模型（失败不阻塞启动，回落 DEFAULT_MODEL）
+    try {
+      const cfg = await api.getConfig()
+      if (cfg.engineModels) setEngineModels(cfg.engineModels)
+    } catch { /* 静默，回落 DEFAULT_MODEL */ }
     const ps = await reloadProjects()
     setTabs((s) => pruneProjects(s, new Set(ps.map((p) => p.id))))   // 丢掉指向已删项目的页签
     setPhase({ tag: 'home' })
@@ -113,7 +133,7 @@ export function AppNav() {
     let sessions = (await api.listSessions(project.id)).sessions
     let session = sessions[0]
     if (!session) {
-      const { sessionId } = await api.createSession({ projectId: project.id, engine: runtime.agent, model: DEFAULT_MODEL[runtime.agent] })
+      const { sessionId } = await api.createSession({ projectId: project.id, engine: runtime.engine, model: seedModel(runtime.engine, engineModels) })
       sessions = (await api.listSessions(project.id)).sessions
       session = sessions.find((s) => s.id === sessionId) ?? sessions[0]
     } else {
@@ -124,7 +144,7 @@ export function AppNav() {
     rememberLastSession(project.id, session.id)
     setOpenSessionIds([session.id])   // 进项目只把当前会话上 tab，其余留历史下拉（Issue 23）
     setPhase({ tag: 'workspace', project, session, sessions, initialMessage })
-  }, [runtime.agent])
+  }, [runtime.engine, engineModels])
 
   const openProjectById = useCallback(async (id: string) => {
     const p = projects.find((x) => x.id === id)
@@ -146,30 +166,55 @@ export function AppNav() {
       try { const { file } = await api.uploadPaste(projectId, s.blob, s.name); contextFiles.push(file.path) }
       catch { /* 单个附件上传失败不阻塞发送 */ }
     }
-    const { sessionId } = await api.createSession({ projectId, engine: runtime.agent, model: DEFAULT_MODEL[runtime.agent] })
+    const { sessionId } = await api.createSession({ projectId, engine: runtime.engine, model: seedModel(runtime.engine, engineModels) })
     const sessions = (await api.listSessions(projectId)).sessions
     const session = sessions.find((s) => s.id === sessionId) ?? sessions[0]
-    const project: ProjectDTO = { id: projectId, name: '未命名项目', path, createdAt: Date.now(), status: 'idle', engine: runtime.agent }
+    const project: ProjectDTO = { id: projectId, name: '未命名项目', path, createdAt: Date.now(), status: 'idle', engine: runtime.engine }
     projectsMutSeq.current++   // 标记乐观改动：防在途旧 reload 把新建项目覆盖掉
     setProjects((prev) => prev.some((x) => x.id === projectId) ? prev : [project, ...prev])   // 乐观入列：页签标题/改名按 id 查得到
     setPhase({ tag: 'workspace', project, session, sessions, initialMessage: text, initialContextFiles: contextFiles })
-  }, [runtime.agent, skills])
+  }, [runtime.engine, skills, engineModels])
 
   // 先切视图（本地状态，必定生效）再后台刷新——导航不被网络刷新挟持，刷新失败也不会把人卡在 workspace。
   const goHome = useCallback(() => { setPhase({ tag: 'home' }); void reloadProjects().catch(() => {}) }, [reloadProjects])
   const goProjects = useCallback(() => { setPhase({ tag: 'projects' }); void reloadProjects().catch(() => {}) }, [reloadProjects])
+  const goIntegrations = useCallback(() => { setPhase({ tag: 'integrations' }); void reloadProjects().catch(() => {}) }, [reloadProjects])
+  const goAutomations = useCallback(() => { setPhase({ tag: 'automations' }); void reloadProjects().catch(() => {}) }, [reloadProjects])
+
+  // 从运行历史/通知打开某次自动化产出的会话：项目可能是本次新建（不在列表）→ 先 reload 再定位，落到 workspace。
+  const onOpenAutomationSession = useCallback(async (projectId: string, sessionId: string) => {
+    let p = projects.find((x) => x.id === projectId)
+    if (!p) { const ps = await reloadProjects().catch(() => projects); p = ps.find((x) => x.id === projectId) }
+    if (!p) return
+    const sessions = (await api.listSessions(projectId)).sessions
+    const session = sessions.find((s) => s.id === sessionId) ?? sessions[0]
+    if (!session) return
+    rememberLastSession(projectId, session.id)
+    setOpenSessionIds([session.id])
+    setPhase({ tag: 'workspace', project: p, session, sessions, initialMessage: undefined })
+  }, [projects, reloadProjects])
 
   // —— 页签交互 ——
+  // 把某个 TabView 导航生效：entry 单例各切对应 phase，project 进项目。
+  const navigateToView = useCallback((view: TabView) => {
+    switch (view.kind) {
+      case 'home': goHome(); break
+      case 'projects': goProjects(); break
+      case 'automations': goAutomations(); break
+      case 'integrations': goIntegrations(); break
+      case 'project': void openProjectById(view.projectId); break
+    }
+  }, [goHome, goProjects, goAutomations, goIntegrations, openProjectById])
+
   const onSelectTab = useCallback((tab: ChromeTab) => {
-    if (tab.kind === 'home') goHome()
-    else void openProjectById(tab.projectId)
-  }, [goHome, openProjectById])
+    navigateToView(tab.kind === 'project' ? { kind: 'project', projectId: tab.projectId } : { kind: tab.kind })
+  }, [navigateToView])
 
   const onCloseTab = useCallback((id: string) => {
     const { state, nextView } = closeTabPure(tabs, id, Date.now())
     setTabs(state)
-    if (nextView) { if (nextView.kind === 'home') goHome(); else void openProjectById(nextView.projectId) }
-  }, [tabs, goHome, openProjectById])
+    if (nextView) navigateToView(nextView)
+  }, [tabs, navigateToView])
 
   // 改名回传：乐观更新 projects（页签标题/项目标题都按 id 现查 projects → 立即同步、单一数据源）+ 同步 phase 快照
   const onRenameActiveProject = useCallback((projectId: string, name: string) => {
@@ -178,6 +223,33 @@ export function AppNav() {
     setPhase((prev) => (prev.tag === 'workspace' && prev.project.id === projectId
       ? { ...prev, project: { ...prev.project, name } } : prev))
   }, [])
+
+  // 运行时档位变化回传：把 model/permissionMode/effort 同步进 phase 的 session 快照（含 sessions 列表 + 当前 session）。
+  // 根因见 sessionRuntimeSync：快照不刷新 → 切回会话时 Workspace 从陈旧档位重初始化、回退用户改动。让快照随变化同步。
+  const onRuntimeChange = useCallback((sessionId: string, cfg: SessionRuntimeCfg) => {
+    setPhase((prev) => {
+      if (prev.tag !== 'workspace') return prev
+      const sessions = applySessionRuntime(prev.sessions, sessionId, cfg)
+      if (sessions === prev.sessions) return prev   // 无变化 → 同引用，不重渲染
+      const session = sessions.find((s) => s.id === prev.session.id) ?? prev.session
+      return { ...prev, sessions, session }
+    })
+  }, [])
+
+  // 项目列表改名：乐观更新（复用 onRenameActiveProject）+ 落库 PUT（对齐 ProjBar 的「先回传乐观、再调 api」）。
+  const onRenameProject = useCallback((id: string, name: string) => {
+    onRenameActiveProject(id, name)
+    void api.renameProject(id, name).catch(() => {})
+  }, [onRenameActiveProject])
+
+  // 项目列表删除（单个/批量）：乐观移除卡片 + 关掉指向已删项目的页签 + 后台 DELETE（删库级联 + 删盘）。
+  const onDeleteProjects = useCallback((ids: string[]) => {
+    const del = new Set(ids)
+    projectsMutSeq.current++   // 标记乐观改动：防在途旧 reload 把删除覆盖回退
+    setProjects((prev) => prev.filter((p) => !del.has(p.id)))
+    setTabs((s) => pruneProjects(s, new Set(projects.filter((p) => !del.has(p.id)).map((p) => p.id))))
+    for (const id of ids) void api.deleteProject(id).catch(() => {})
+  }, [projects])
 
   // 会话属性修改（改名 title / 置顶 pinned）：先乐观更新内存里的会话清单（列表 + 页签即时刷新）再 PATCH 落库。
   // sessions 是标题/置顶的唯一数据源（进项目时 listSessions 一次性缓存），只 PATCH 不回写就会「后台改了界面没变」。
@@ -250,7 +322,7 @@ export function AppNav() {
     // 项目标题与顶部页签同源：都按 id 现查 live projects（改名后唯一数据源即时刷新），projects 暂缺时回落 phase 快照。
     const liveProjectName = projects.find((p) => p.id === project.id)?.name ?? project.name
     const newSession = async () => {
-      const { sessionId } = await api.createSession({ projectId: project.id, engine: runtime.agent, model: DEFAULT_MODEL[runtime.agent] })
+      const { sessionId } = await api.createSession({ projectId: project.id, engine: runtime.engine, model: seedModel(runtime.engine, engineModels) })
       const ss = (await api.listSessions(project.id)).sessions
       const found = ss.find((s) => s.id === sessionId) ?? ss[0]
       if (found) {
@@ -276,7 +348,7 @@ export function AppNav() {
         rememberLastSession(project.id, next.id)
         setPhase((prev) => (prev.tag === 'workspace' ? { ...prev, session: next, sessions: remaining, initialMessage: undefined } : prev))
       } else {
-        const { sessionId } = await api.createSession({ projectId: project.id, engine: runtime.agent, model: DEFAULT_MODEL[runtime.agent] })
+        const { sessionId } = await api.createSession({ projectId: project.id, engine: runtime.engine, model: seedModel(runtime.engine, engineModels) })
         const ss = (await api.listSessions(project.id)).sessions
         const found = ss.find((s) => s.id === sessionId) ?? ss[0]
         if (found) {
@@ -301,6 +373,7 @@ export function AppNav() {
           initialMessage={initialMessage}
           initialContextFiles={initialContextFiles}
           chrome={chromeEl}
+          onRuntimeChange={onRuntimeChange}
           onSelectSession={onSelectSession}
           onCloseSessionTab={onCloseSessionTab}
           onNewSession={() => void newSession()}
@@ -315,18 +388,22 @@ export function AppNav() {
     )
   }
 
-  // entry 视图（home / projects）
-  const active = phase.tag === 'projects' ? 'projects' : 'home'
+  // entry 视图（home / projects / automations / integrations）
+  const active = phase.tag === 'projects' ? 'projects' : phase.tag === 'integrations' ? 'integrations' : phase.tag === 'automations' ? 'automations' : 'home'
   return (
     <RuntimeContext.Provider value={{ runtime, dispatch: rtDispatch }}>
       <EntryShell
         chrome={chromeEl}
-        rail={<Rail active={active} onNewProject={() => setShowNewProject(true)} onHome={() => void goHome()} onProjects={() => void goProjects()} />}
+        rail={<Rail active={active} onNewProject={() => setShowNewProject(true)} onHome={() => void goHome()} onProjects={() => void goProjects()} onAutomations={() => void goAutomations()} onIntegrations={() => void goIntegrations()} />}
         topbar={<Topbar />}
       >
-        {phase.tag === 'projects'
-          ? <Projects projects={projects} onOpenProject={(id) => void openProjectById(id)} />
-          : <Home projects={projects} onSend={(t, staged) => void homeSend(t, staged)} onOpenProject={(id) => void openProjectById(id)} onViewAll={() => void goProjects()} skillCount={skills.length} onOpenSkillModal={() => setShowSkill(true)} />}
+        {phase.tag === 'integrations'
+          ? <Integrations />
+          : phase.tag === 'automations'
+            ? <TaskAutomation projects={projects} onOpenSession={(pid, sid) => void onOpenAutomationSession(pid, sid)} />
+            : phase.tag === 'projects'
+              ? <Projects projects={projects} onOpenProject={(id) => void openProjectById(id)} onRenameProject={onRenameProject} onDeleteProjects={onDeleteProjects} />
+              : <Home projects={projects} onSend={(t, staged) => void homeSend(t, staged)} onOpenProject={(id) => void openProjectById(id)} onViewAll={() => void goProjects()} skillCount={skills.length} onOpenSkillModal={() => setShowSkill(true)} />}
       </EntryShell>
       {showNewProject && <NewProjectModal onClose={() => setShowNewProject(false)} onCreated={(id) => void handleProjectCreated(id)} />}
       {showSkill && <SkillModal initialSelected={skills} onClose={() => setShowSkill(false)} onDone={(s) => { setSkills(s); setShowSkill(false) }} />}

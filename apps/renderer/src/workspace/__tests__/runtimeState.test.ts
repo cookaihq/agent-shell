@@ -1,47 +1,25 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeEach } from 'vitest'
 import {
   CLI_MODELS,
-  CODEX_APPROVAL,
-  CODEX_SANDBOX,
-  EFFORTS,
   AGENT_LABEL,
-  APPROVAL_SHORT,
-  SANDBOX_SHORT,
-  CODEX_RISK,
   RISK_COLOR,
   initialRuntime,
-  chipPerm,
-  chipEffort,
   runtimeReducer,
+  modelLabel,
+  saveLastRuntime,
+  type RuntimeState,
 } from '../runtimeState'
 
-describe('常量 1:1 移植', () => {
+beforeEach(() => {
+  // 投影 bag 持久化在 localStorage，逐用例清空避免互染
+  localStorage.clear()
+})
+
+describe('中立常量', () => {
   it('CLI_MODELS 含 claude SDK 别名/变体 + codex（value/label 形态）', () => {
     expect(CLI_MODELS.claude.map((m) => m.value)).toEqual(expect.arrayContaining(['default', 'sonnet', 'haiku', 'opus', 'opus[1m]']))
-    expect(CLI_MODELS.claude.find((m) => m.value === 'opus[1m]')?.label).toBe('Opus (1M context)')
-    expect(CLI_MODELS.codex.map((m) => m.value)).toEqual(expect.arrayContaining(['GPT 5.5', 'GPT 5.4 Mini']))
-  })
-
-  it('CODEX_APPROVAL 3 个，含 id/zh/en', () => {
-    expect(CODEX_APPROVAL).toHaveLength(3)
-    expect(CODEX_APPROVAL[0]).toMatchObject({ id: 'untrusted', zh: '仅受信命令', en: 'Untrusted' })
-    expect(CODEX_APPROVAL[1]).toMatchObject({ id: 'on-request', zh: '按需询问', en: 'On request' })
-  })
-
-  it('CODEX_SANDBOX 3 个，含 id/zh/en', () => {
-    expect(CODEX_SANDBOX).toHaveLength(3)
-    expect(CODEX_SANDBOX[0]).toMatchObject({ id: 'read-only', zh: '只读', en: 'Read only' })
-    expect(CODEX_SANDBOX[2]).toMatchObject({ id: 'danger-full-access', zh: '完全访问', en: 'Full access' })
-  })
-
-  it('EFFORTS.claude 5 个，EFFORTS.codex 5 个', () => {
-    expect(EFFORTS.claude).toHaveLength(5)
-    expect(EFFORTS.codex).toHaveLength(5)
-    expect(EFFORTS.claude[0]).toMatchObject({ id: 'low', zh: '低', en: 'Low' })
-    expect(EFFORTS.claude[3]).toMatchObject({ id: 'xhigh', zh: '极高', en: 'xHigh' })
-    expect(EFFORTS.claude[4]).toMatchObject({ id: 'max', zh: '最大', en: 'Max' })
-    expect(EFFORTS.codex[0]).toMatchObject({ id: 'minimal', zh: '最小', en: 'Minimal' })
-    expect(EFFORTS.codex[4]).toMatchObject({ id: 'xhigh', zh: '极高', en: 'xHigh' })
+    expect(CLI_MODELS.claude.find((m) => m.value === 'opus[1m]')?.label).toBe('Opus 1M')
+    expect(CLI_MODELS.codex.map((m) => m.value)).toEqual(expect.arrayContaining(['gpt-5.5', 'gpt-5.4-mini']))   // 真实 codex slug
   })
 
   it('AGENT_LABEL 映射', () => {
@@ -49,22 +27,7 @@ describe('常量 1:1 移植', () => {
     expect(AGENT_LABEL.codex).toBe('Codex CLI')
   })
 
-  it('APPROVAL_SHORT 3 键', () => {
-    expect(APPROVAL_SHORT['on-request']).toBe('按需')
-    expect(APPROVAL_SHORT.never).toBe('从不')
-  })
-
-  it('SANDBOX_SHORT 3 键', () => {
-    expect(SANDBOX_SHORT['read-only']).toBe('只读')
-    expect(SANDBOX_SHORT['danger-full-access']).toBe('完全')
-  })
-
-  it('CODEX_RISK 3 键', () => {
-    expect(CODEX_RISK['read-only']).toBe('low')
-    expect(CODEX_RISK['danger-full-access']).toBe('high')
-  })
-
-  it('RISK_COLOR 4 键', () => {
+  it('RISK_COLOR 4 键（中立风险枚举 → 色）', () => {
     expect(RISK_COLOR.low).toBe('var(--green)')
     expect(RISK_COLOR.high).toBe('var(--red)')
     expect(RISK_COLOR.ask).toBe('var(--amber)')
@@ -72,111 +35,134 @@ describe('常量 1:1 移植', () => {
   })
 })
 
-describe('initialRuntime', () => {
+describe('initialRuntime（中立槽）', () => {
   it('已知 model（SDK 别名）直接用', () => {
     const rt = initialRuntime('claude', 'opus')
-    expect(rt.agent).toBe('claude')
-    expect(rt.model).toBe('opus')   // 'opus' 是 CLI_MODELS.claude 里的 value，保留不洗
+    expect(rt.engine).toBe('claude')
+    expect(rt.model).toBe('opus')   // 'opus' 在 claude 列表 value 里，保留不洗
   })
 
-  it('未知 model 回退到列表第一个 value（syncRuntime L215 逻辑）', () => {
+  it('未知 model 回退到列表第一个 value', () => {
     const rt = initialRuntime('claude', 'Claude Opus 4.8')  // 旧显示名不在 value 列表 → 回退
     expect(rt.model).toBe(CLI_MODELS.claude[0].value)
   })
 
-  it('codex 引擎初始态', () => {
-    const rt = initialRuntime('codex', 'GPT 5.5')
-    expect(rt.agent).toBe('codex')
-    expect(rt.model).toBe('GPT 5.5')
-    expect(rt.codexApproval).toBe('on-request')
-    expect(rt.codexSandbox).toBe('workspace-write')
-    expect(rt.effort.claude).toBe('high')
-    expect(rt.effort.codex).toBe('medium')
+  it('claude 初始中立槽', () => {
+    const rt = initialRuntime('claude', 'opus')
+    expect(rt.permissionMode).toBe('default')
+    expect(rt.reasoning).toBe('high')
+  })
+
+  it('codex 初始中立槽（modeSelections 承载审批/沙箱）', () => {
+    const rt = initialRuntime('codex', 'gpt-5.5')
+    expect(rt.engine).toBe('codex')
+    expect(rt.model).toBe('gpt-5.5')
+    expect(rt.reasoning).toBe('medium')
+    expect(rt.modeSelections).toEqual({ approval: 'on-request', sandbox: 'workspace-write' })
+  })
+
+  it('会话 init 回填（DB 存的 permissionMode/effort 最高优先）', () => {
+    const rt = initialRuntime('claude', 'opus', { permissionMode: 'plan', effort: 'max' })
+    expect(rt.permissionMode).toBe('plan')
+    expect(rt.reasoning).toBe('max')
   })
 })
 
-describe('chipPerm', () => {
-  it('claude default → 询问 ask（5 档权限选择器，接 SDK 真链路）', () => {
-    const rt = initialRuntime('claude', 'Claude Opus 4.8')
-    expect(chipPerm(rt)).toEqual({ text: '询问', risk: 'ask' })
-  })
-
-  it('claude bypassPermissions → 绕过 high', () => {
-    const rt = { ...initialRuntime('claude', 'Claude Opus 4.8'), claudeMode: 'bypassPermissions' as const }
-    expect(chipPerm(rt)).toEqual({ text: '绕过', risk: 'high' })
-  })
-
-  it('codex on-request × workspace-write → 按需·工作区 mid', () => {
-    const rt = initialRuntime('codex', 'GPT 5.5')
-    const perm = chipPerm(rt)
-    expect(perm?.text).toBe('按需·工作区')
-    expect(perm?.risk).toBe('mid')
-  })
-
-  it('codex never × danger-full-access → 从不·完全 high', () => {
-    const rt = {
-      ...initialRuntime('codex', 'GPT 5.5'),
-      codexApproval: 'never' as const,
-      codexSandbox: 'danger-full-access' as const,
-    }
-    expect(chipPerm(rt)).toEqual({ text: '从不·完全', risk: 'high' })
-  })
-})
-
-describe('chipEffort', () => {
-  it('claude high → "高"', () => {
-    const rt = initialRuntime('claude', 'Claude Opus 4.8')
-    expect(chipEffort(rt)).toBe('高')
-  })
-
-  it('codex medium → "中"', () => {
-    const rt = initialRuntime('codex', 'GPT 5.5')
-    expect(chipEffort(rt)).toBe('中')
-  })
-
-  it('极端值 xhigh → "极高"（对齐 SDK EffortLevel，无 ultra）', () => {
-    const rt = { ...initialRuntime('claude', 'Claude Opus 4.8'), effort: { claude: 'xhigh' as const, codex: 'medium' as const } }
-    expect(chipEffort(rt)).toBe('极高')
-  })
-})
-
-describe('runtimeReducer', () => {
+describe('runtimeReducer（中立 action）', () => {
   it('SET_AGENT 切 agent，model 若不在新列表则回退', () => {
-    const rt = initialRuntime('claude', 'Claude Opus 4.8')
+    const rt = initialRuntime('claude', 'opus')
     const next = runtimeReducer(rt, { type: 'SET_AGENT', agent: 'codex' })
-    expect(next.agent).toBe('codex')
-    // claude 默认模型不在 codex 列表，应该回退到 codex[0] 的 value
-    expect(next.model).toBe(CLI_MODELS.codex[0].value)
+    expect(next.engine).toBe('codex')
+    expect(next.model).toBe(CLI_MODELS.codex[0].value)  // claude 模型不在 codex 列表，回退首个
   })
 
   it('SET_MODEL 直接替换', () => {
-    const rt = initialRuntime('claude', 'Claude Opus 4.8')
-    const next = runtimeReducer(rt, { type: 'SET_MODEL', model: 'Claude Sonnet 4.6' })
-    expect(next.model).toBe('Claude Sonnet 4.6')
+    const rt = initialRuntime('claude', 'opus')
+    const next = runtimeReducer(rt, { type: 'SET_MODEL', model: 'sonnet' })
+    expect(next.model).toBe('sonnet')
   })
 
-  it('SET_CLAUDE_MODE 切权限档', () => {
-    const rt = initialRuntime('claude', 'Claude Opus 4.8')
-    const next = runtimeReducer(rt, { type: 'SET_CLAUDE_MODE', claudeMode: 'plan' })
-    expect(next.claudeMode).toBe('plan')
+  it('SET_PERMISSION_MODE 切权限档（中立槽）', () => {
+    const rt = initialRuntime('claude', 'opus')
+    const next = runtimeReducer(rt, { type: 'SET_PERMISSION_MODE', permissionMode: 'plan' })
+    expect(next.permissionMode).toBe('plan')
   })
 
-  it('SET_CODEX_APPROVAL', () => {
-    const rt = initialRuntime('codex', 'GPT 5.5')
-    const next = runtimeReducer(rt, { type: 'SET_CODEX_APPROVAL', codexApproval: 'never' })
-    expect(next.codexApproval).toBe('never')
+  it('SET_MODE_SELECTION 写 codex approval/sandbox 槽', () => {
+    const rt = initialRuntime('codex', 'gpt-5.5')
+    const a = runtimeReducer(rt, { type: 'SET_MODE_SELECTION', slot: 'approval', value: 'never' })
+    expect(a.modeSelections?.approval).toBe('never')
+    const b = runtimeReducer(a, { type: 'SET_MODE_SELECTION', slot: 'sandbox', value: 'danger-full-access' })
+    expect(b.modeSelections?.sandbox).toBe('danger-full-access')
+    expect(b.modeSelections?.approval).toBe('never')  // 另一槽不变
   })
 
-  it('SET_CODEX_SANDBOX', () => {
-    const rt = initialRuntime('codex', 'GPT 5.5')
-    const next = runtimeReducer(rt, { type: 'SET_CODEX_SANDBOX', codexSandbox: 'danger-full-access' })
-    expect(next.codexSandbox).toBe('danger-full-access')
+  it('SET_REASONING 切 effort（中立槽）', () => {
+    const rt = initialRuntime('claude', 'opus')
+    const next = runtimeReducer(rt, { type: 'SET_REASONING', reasoning: 'xhigh' })
+    expect(next.reasoning).toBe('xhigh')
+  })
+})
+
+describe('per-agent 投影 bag（Issue 13：切 CLI 复用上次档位）', () => {
+  it('切 codex → 调档 → 切回 claude → 再切回 codex，复用 codex 上次档位', () => {
+    // claude 起步，改 permissionMode/reasoning
+    let rt: RuntimeState = initialRuntime('claude', 'opus')
+    rt = runtimeReducer(rt, { type: 'SET_PERMISSION_MODE', permissionMode: 'bypassPermissions' })
+    rt = runtimeReducer(rt, { type: 'SET_REASONING', reasoning: 'max' })
+    // 切 codex，改其档位
+    rt = runtimeReducer(rt, { type: 'SET_AGENT', agent: 'codex' })
+    rt = runtimeReducer(rt, { type: 'SET_MODE_SELECTION', slot: 'approval', value: 'never' })
+    rt = runtimeReducer(rt, { type: 'SET_REASONING', reasoning: 'high' })
+    rt = runtimeReducer(rt, { type: 'SET_MODEL', model: 'gpt-5.4' })
+    // 切回 claude → 应复用 claude 上次（bypass/max/opus）
+    rt = runtimeReducer(rt, { type: 'SET_AGENT', agent: 'claude' })
+    expect(rt.permissionMode).toBe('bypassPermissions')
+    expect(rt.reasoning).toBe('max')
+    expect(rt.model).toBe('opus')
+    // 再切回 codex → 应复用 codex 上次（never/high/gpt-5.4）
+    rt = runtimeReducer(rt, { type: 'SET_AGENT', agent: 'codex' })
+    expect(rt.modeSelections?.approval).toBe('never')
+    expect(rt.reasoning).toBe('high')
+    expect(rt.model).toBe('gpt-5.4')
   })
 
-  it('SET_EFFORT 按 agent 更新对应档位', () => {
-    const rt = initialRuntime('claude', 'Claude Opus 4.8')
-    const next = runtimeReducer(rt, { type: 'SET_EFFORT', agent: 'claude', effortId: 'xhigh' })
-    expect(next.effort.claude).toBe('xhigh')
-    expect(next.effort.codex).toBe('medium') // codex 不变
+  it('saveLastRuntime 把投影 bag 落 localStorage，新 initialRuntime 读回上次值', () => {
+    let rt: RuntimeState = initialRuntime('claude', 'opus')
+    rt = runtimeReducer(rt, { type: 'SET_PERMISSION_MODE', permissionMode: 'acceptEdits' })
+    rt = runtimeReducer(rt, { type: 'SET_REASONING', reasoning: 'low' })
+    saveLastRuntime(rt)
+    // 模拟新会话/新进程：再开一个 claude 会话（无 init），应复用上次 acceptEdits/low
+    const fresh = initialRuntime('claude', 'opus')
+    expect(fresh.permissionMode).toBe('acceptEdits')
+    expect(fresh.reasoning).toBe('low')
+  })
+})
+
+describe('modelLabel（经切片解析展示名）', () => {
+  it('claude 动态：选中 opus[1m] → Opus 1M（对齐后强制展示名，覆盖 SDK 给的 displayName）', () => {
+    const dyn = [
+      { value: 'default', displayName: 'Default (recommended)', description: '1M context' },
+      { value: 'sonnet', displayName: 'Sonnet', description: 'Everyday' },
+      { value: 'haiku', displayName: 'Haiku', description: 'Fast' },
+      { value: 'opus[1m]', displayName: 'Opus (1M context)', description: 'Opus 4.8 · 1M context' },
+    ]
+    expect(modelLabel('claude', 'opus[1m]', dyn)).toBe('Opus 1M')
+  })
+
+  it('claude 静态兜底（dyn=null）：opus[1m] → Opus 1M', () => {
+    expect(modelLabel('claude', 'opus[1m]', null)).toBe('Opus 1M')
+  })
+
+  it('claude 静态兜底：default → Default (recommended)', () => {
+    expect(modelLabel('claude', 'default', null)).toBe('Default (recommended)')
+  })
+
+  it('查不到 → 回退 value 自身', () => {
+    expect(modelLabel('claude', 'nonexistent', null)).toBe('nonexistent')
+  })
+
+  it('codex：真实 slug → 友好展示名（value=gpt-5.5 → label GPT 5.5）', () => {
+    expect(modelLabel('codex', 'gpt-5.5', null)).toBe('GPT 5.5')
   })
 })

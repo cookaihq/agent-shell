@@ -9,11 +9,12 @@ vi.mock('../../api/client', () => ({ ApiError: class extends Error { constructor
   engines: vi.fn().mockResolvedValue({ engines: { claude: '/c', codex: null } }),
   listProjects: vi.fn().mockResolvedValue({ projects: [{ id: 'p1', name: '项目甲', path: '/x', createdAt: 1, status: 'idle', engine: 'claude' }] }),
   listSessions: vi.fn().mockResolvedValue({ sessions: [{ id: 's1', projectId: 'p1', engine: 'claude', model: 'opus', title: '会话一', pinned: false, status: 'completed', resumableId: 'r', createdAt: 1 }] }),
-  messages: vi.fn().mockResolvedValue({ messages: [] }), status: vi.fn().mockResolvedValue({ running: false, status: 'completed' }),
+  messages: vi.fn().mockResolvedValue({ records: [] }), status: vi.fn().mockResolvedValue({ running: false, status: 'completed' }),
   usage: vi.fn().mockResolvedValue({ inputTokens: 0, outputTokens: 0, costUsd: 0 }), files: vi.fn().mockResolvedValue({ tree: [] }),
   createSession: vi.fn().mockResolvedValue({ sessionId: 's-new' }), createProject: vi.fn().mockResolvedValue({ projectId: 'p-new', path: '/p-new' }),
   renameProject: vi.fn(), patchSession: vi.fn(), resume: vi.fn(), interrupt: vi.fn(), submit: vi.fn(),
   listSkills: vi.fn().mockResolvedValue({ skills: [] }),
+  commands: vi.fn().mockResolvedValue({ commands: null }),
   getConfig: vi.fn().mockResolvedValue({ projectsDir: '/p', skillsDir: '/s' }),
 } }))
 // 页签持久在 localStorage（workspaceTabs），用例间必须清，否则上个用例残留的项目页签会
@@ -62,7 +63,7 @@ describe('AppNav', () => {
     await userEvent.clear(input)
     await userEvent.type(input, '会话二{Enter}')
     expect(api.patchSession).toHaveBeenCalledWith('s1', { title: '会话二' })   // 落库
-    expect(container.querySelector('.st-title')?.textContent).toBe('会话二')   // 页签即时刷新
+    expect(container.querySelector('.conv-tab .ct')?.textContent).toBe('会话二')   // 页签即时刷新（conv-tabs）
     expect(screen.queryByText('会话一')).toBeNull()                            // 旧名全部消失
   })
   it('会话置顶 → 状态即时回写（pinned 反映到 UI，不只发 PATCH）', async () => {
@@ -120,5 +121,21 @@ describe('AppNav', () => {
     await userEvent.type(ta, '做个登录页')
     await userEvent.keyboard('{Enter}')
     expect(api.createProject).toHaveBeenCalledWith('未命名项目', expect.any(Array))
+  })
+  it('regression FIX1: boot 后 engineModels 生效——homeSend 建会话用持久化模型而非 DEFAULT_MODEL', async () => {
+    // 验证 homeSend useCallback 里 engineModels 不是过期闭包：
+    // getConfig 返回 { claude: 'sonnet' }，发送后 createSession 的 model 必须是 'sonnet' 而非默认 'opus'。
+    // 修复前：homeSend 依赖数组缺 engineModels → 永远捕获初始 {}  → seedModel 回落 DEFAULT_MODEL.claude='opus'。
+    // 修复后：依赖数组包含 engineModels → boot 异步更新后 homeSend 重建 → seedModel 拿到 'sonnet'。
+    const { api } = await import('../../api/client') as any
+    api.getConfig.mockResolvedValue({ projectsDir: '/p', skillsDir: '/s', engineModels: { claude: 'sonnet' } })
+    // createSession 返回 's-new'；listSessions 得包含该 id，避免 session[0]=undefined 崩渲染
+    api.listSessions.mockResolvedValue({ sessions: [{ id: 's-new', projectId: 'p-new', engine: 'claude', model: 'sonnet', title: '新会话', pinned: false, status: 'idle', resumableId: null, createdAt: Date.now() }] })
+    render(<SettingsProvider><AppNav /></SettingsProvider>); await act(async () => {})
+    const ta = await screen.findByPlaceholderText(/描述你想让 agent/)
+    await userEvent.type(ta, '测试持久化模型')
+    await userEvent.keyboard('{Enter}')
+    await act(async () => {})
+    expect(api.createSession).toHaveBeenCalledWith(expect.objectContaining({ model: 'sonnet' }))
   })
 })

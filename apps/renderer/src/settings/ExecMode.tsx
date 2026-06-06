@@ -3,6 +3,7 @@ import type { AgentShellBridge } from '@agent-shell/contracts'
 import { api } from '../api/client'
 import type { EngineDetail } from '../api/types'
 import { CLI_MODELS } from '../workspace/runtimeState'
+import { ProviderSection } from './ProviderSection'
 
 // 每个引擎的测试结果状态
 type TestResult = { ok: boolean; message?: string } | null
@@ -52,8 +53,8 @@ export function ExecMode() {
   const [selectedName, setSelectedName] = useState<string | null>(null)
   // 每引擎测试结果（测试按钮文案/状态）：null=未测试, loading=测试中
   const [testResults, setTestResults] = useState<Record<string, TestResult | 'loading'>>({})
-  // 每个引擎的当前 chip 选中索引
-  const [chipIndex, setChipIndex] = useState<Record<string, number>>({})
+  // 每引擎持久化的默认模型（来自 config.json engineModels，key=engine name, value=model value）
+  const [engineModels, setEngineModels] = useState<Record<string, string>>({})
   // 每引擎更新信息（进页面异步查 npm 最新版；查不到/网络错则该引擎无条目，不提示）
   const [updates, setUpdates] = useState<Record<string, UpdateInfo>>({})
 
@@ -81,9 +82,20 @@ export function ExecMode() {
     }
   }
 
+  // 加载持久化的每引擎默认模型
+  async function loadEngineModels() {
+    try {
+      const cfg = await api.getConfig()
+      setEngineModels(cfg.engineModels ?? {})
+    } catch {
+      // 读不到配置时用空对象（各引擎回落到 CLI_MODELS 第一个选项）
+    }
+  }
+
   useEffect(() => {
     loadEngines()
     loadUpdates()
+    loadEngineModels()
   }, [])
 
   // 点更新徽标：在系统浏览器打开官方 GitHub releases 页（桌面壳走 openExternal 桥，dev/浏览器回落 window.open）
@@ -97,11 +109,10 @@ export function ExecMode() {
   // 选中引擎
   const selectedEngine = engines.find(e => e.name === selectedName) ?? null
 
-  // 切换选中引擎时重置 chip 到第 0 个
+  // 切换选中引擎
   function handleSelectEngine(engine: EngineDetail) {
     if (engine.bin == null) return
     setSelectedName(engine.name)
-    setChipIndex(prev => ({ ...prev, [engine.name]: 0 }))
   }
 
   // 测试引擎
@@ -126,14 +137,14 @@ export function ExecMode() {
   // 检测到的引擎数量（bin != null）
   const detectedCount = engines.filter(e => e.bin != null).length
 
-  // 当前选中引擎的内置模型 chips
-  const modelOptions = selectedEngine
-    ? ['Default (CLI config)', ...(CLI_MODELS[selectedEngine.name] ?? []).map((m) => m.label)]
-    : []
-  const currentChipIdx = selectedEngine ? (chipIndex[selectedEngine.name] ?? 0) : 0
-
-  function handleChipClick(engineName: string, idx: number) {
-    setChipIndex(prev => ({ ...prev, [engineName]: idx }))
+  // 点击模型 chip：持久化到 config.json 成功后才更新本地状态（避免存盘失败时假成功）
+  async function handleModelChipClick(engineName: string, modelValue: string) {
+    try {
+      await api.saveConfig({ engineModels: { [engineName]: modelValue } as Record<string, string> })
+      setEngineModels((prev) => ({ ...prev, [engineName]: modelValue }))
+    } catch (err) {
+      console.error('保存默认模型失败', err)
+    }
   }
 
   return (
@@ -208,20 +219,24 @@ export function ExecMode() {
             <div className="field">
               <div className="field-label">模型 · 内置列表</div>
               <div className="model-chips">
-                {modelOptions.map((opt, idx) => (
-                  <button
-                    key={opt}
-                    className={`model-chip${idx === currentChipIdx ? ' on' : ''}`}
-                    onClick={() => handleChipClick(selectedEngine.name, idx)}
-                  >
-                    {opt}<span className="mk">✓</span>
-                  </button>
-                ))}
+                {(CLI_MODELS[selectedEngine.name] ?? []).map((opt) => {
+                  const selectedValue = engineModels[selectedEngine.name] ?? (CLI_MODELS[selectedEngine.name]?.[0]?.value ?? '')
+                  return (
+                    <button
+                      key={opt.value}
+                      className={`model-chip${opt.value === selectedValue ? ' on' : ''}`}
+                      onClick={() => void handleModelChipClick(selectedEngine.name, opt.value)}
+                    >
+                      {opt.label}<span className="mk">✓</span>
+                    </button>
+                  )
+                })}
               </div>
             </div>
-            <div className="field-hint">正在显示内置默认值。点击“重新扫描”可从 CLI 拉取实时模型。</div>
+            <div className="field-hint">选择该引擎新建会话的默认模型（已保存）。会话内可在右上角临时切换。</div>
           </div>
         )}
+        {selectedEngine && <ProviderSection engine={selectedEngine.name} model={engineModels[selectedEngine.name] ?? CLI_MODELS[selectedEngine.name]?.[0]?.value} />}
       </div>
     </>
   )

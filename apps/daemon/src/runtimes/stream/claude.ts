@@ -11,10 +11,22 @@ function toText(c: unknown): string {
   return ''
 }
 
-/** 从失败 result 行提取可读真因：优先 result 文本（claude 把错误信息放这），退而用 subtype（error_max_turns 等）。 */
+/** 从失败 result 行提取可读真因。失败 result 有两种结构，真因位置不同：
+ *  - SDKResultSuccess（api_error_status 等）：错误文本在 `result` 字段。
+ *  - SDKResultError（error_during_execution / error_max_turns 等）：**无 `result` 字段**，
+ *    真因在 `errors: string[]`，错误大类在 `terminal_reason`（prompt_too_long / model_error / image_error…）。
+ *  取值优先级：result 文本 → errors[]（必要时前缀 terminal_reason）→ terminal_reason → subtype 兜底。
+ *  以前只读 result 然后退回 subtype，导致 error_during_execution 的真因（在 errors[]）被静默吞掉，UI 只剩一句 subtype。 */
 function claudeErrDetail(o: any): string | undefined {
   const r = typeof o?.result === 'string' ? o.result.trim() : ''
   if (r) return r
+  const errs = Array.isArray(o?.errors)
+    ? o.errors.filter((e: unknown): e is string => typeof e === 'string' && e.trim() !== '').map((e: string) => e.trim())
+    : []
+  const body = errs.join('; ')
+  const reason = typeof o?.terminal_reason === 'string' ? o.terminal_reason.trim() : ''
+  if (body) return reason ? `${reason}: ${body}` : body
+  if (reason) return reason
   return typeof o?.subtype === 'string' ? o.subtype : undefined
 }
 
@@ -90,6 +102,8 @@ export function parseClaudeObject(o: any): AgentEvent[] {
       break
     }
     case 'system': {
+      // 上下文压缩边界：claude 主动压缩历史 → 外壳据此重置上下文基线 + 插中立分隔（spec §4.4）。
+      if (o.subtype === 'compact_boundary') { emit(out, { type: 'context_compacted' }); break }
       // 子代理生命周期三类 system 消息 → subagent 事件；其余 system（init/session_state_changed…）忽略。
       const sub = parseTaskSystem(o)
       if (sub) emit(out, sub)
@@ -175,11 +189,15 @@ export function createClaudeObjectParser(now: () => number = () => Date.now()): 
   // 最终 assistant 消息里的 text 块由此去重跳过（已流式发过）。
   const textBuf = new Map<string, string>()
   let lastTextEmitAt = 0
+  // 上下文真实占用累计器：result 行 usage 只有 input_tokens（不含 cache），cache 主体在 assistant 逐条 message.usage。
+  // 跨 assistant 逐字段 max 合并（对齐 Claudian mergePromptUsage），result 行 emit usage 时算出 contextTokens=三者之和。
+  let promptTokens = { input: 0, cacheCreation: 0, cacheRead: 0 }
 
   const reset = () => {
     tokens = 0; lastEmitTokens = -1; lastEmitAt = 0
     activity = { kind: 'thinking' }; lastActivityKey = ''
     toolJson.clear(); thinkingText.clear(); thinkingStart.clear(); textBuf.clear(); lastTextEmitAt = 0
+    promptTokens = { input: 0, cacheCreation: 0, cacheRead: 0 }
   }
 
   const emitProgress = (out: AgentEvent[], force = false): void => {
@@ -271,10 +289,29 @@ export function createClaudeObjectParser(now: () => number = () => Date.now()): 
       // parent_tool_use_id 在 SDKPartialAssistantMessage 顶层（非 event 内）→ 透传给子代理流的累计与归属。
       return handleStreamEvent(o.event, typeof o.parent_tool_use_id === 'string' ? o.parent_tool_use_id : undefined)
     }
+    // assistant 逐条 message.usage 的 cache token 逐字段 max 合并（真实上下文占用主体；result 行不含 cache）
+    if (o.type === 'assistant') {
+      const u = o.message?.usage
+      if (u && typeof u === 'object') {
+        const n = (v: unknown): number => (typeof v === 'number' && v > 0 ? v : 0)
+        promptTokens = {
+          input: Math.max(promptTokens.input, n(u.input_tokens)),
+          cacheCreation: Math.max(promptTokens.cacheCreation, n(u.cache_creation_input_tokens)),
+          cacheRead: Math.max(promptTokens.cacheRead, n(u.cache_read_input_tokens)),
+        }
+      }
+    }
     let out = parseClaudeObject(o) // assistant/user/result 照旧
     // 正文已由 text_delta 逐字流式 + content_block_stop 定格发出 → 去重：丢弃最终 assistant 消息里的 message(text) 事件
     if (o.type === 'assistant') out = out.filter((e) => e.type !== 'message')
-    if (o.type === 'result') reset()
+    if (o.type === 'result') {
+      // result 行的 usage 事件补 contextTokens(含 cache) + authoritative（contextWindow 来自运行时则权威）
+      const contextTokens = promptTokens.input + promptTokens.cacheCreation + promptTokens.cacheRead
+      out = out.map((e) => e.type === 'usage'
+        ? { ...e, contextTokens, contextWindowIsAuthoritative: e.contextWindow !== undefined }
+        : e)
+      reset()
+    }
     return out
   }
 }

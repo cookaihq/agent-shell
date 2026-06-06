@@ -43,6 +43,13 @@ describe('parseCodexLine', () => {
     expect(parseCodexLine('{"type":"item.started","item":{"type":"command_execution","command":"x"}}')).toEqual([])
   })
 
+  // ── 中立 tool 字段（§11#1）─────────────────────────────────────────────────
+  it('command_execution item.started 发出 tool_use：tool="bash"，name="shell"，input.command 保留', () => {
+    const ev = parseCodexLine('{"type":"item.started","item":{"type":"command_execution","id":"c1","command":"echo hi"}}')
+    expect(ev).toHaveLength(1)
+    expect(ev[0]).toMatchObject({ type: 'tool_use', id: 'c1', name: 'shell', input: { command: 'echo hi' }, tool: 'bash' })
+  })
+
   it('非零退出码映射为 tool_result.ok=false（失败语义）', () => {
     const ev = parseCodexLine('{"type":"item.completed","item":{"id":"item_9","type":"command_execution","command":"false","exit_code":1,"aggregated_output":"boom"}}')
     expect(ev).toEqual([{ type: 'tool_result', toolUseId: 'item_9', ok: false, content: 'boom' }])

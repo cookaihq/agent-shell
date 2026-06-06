@@ -16,7 +16,7 @@ vi.mock('../api/client', () => ({
     engines: vi.fn().mockResolvedValue({ engines: { claude: '/usr/bin/claude', codex: null } }),
     listProjects: vi.fn().mockResolvedValue({ projects: [{ id: 'p1', name: 'TestProject', path: '/p', createdAt: 0, status: 'idle', engine: 'claude' }] }),
     listSessions: vi.fn().mockResolvedValue({ sessions: [{ id: 's1', projectId: 'p1', engine: 'claude', model: 'opus', title: 'TestSession', pinned: false, status: 'idle', resumableId: null, createdAt: 0 }] }),
-    messages: vi.fn().mockResolvedValue({ messages: [] }),
+    messages: vi.fn().mockResolvedValue({ records: [] }),
     status: vi.fn().mockResolvedValue({ running: false, status: 'idle' }),
     usage: vi.fn().mockResolvedValue({ inputTokens: 0, outputTokens: 0, costUsd: 0 }),
     files: vi.fn().mockResolvedValue({ tree: [] }),

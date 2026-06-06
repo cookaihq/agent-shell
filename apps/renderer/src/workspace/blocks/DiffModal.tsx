@@ -6,7 +6,7 @@
  */
 import { useEffect } from 'react'
 import { buildDiff } from './diff'
-import { DiffLine } from './OpCard'
+import { DiffLine } from './dumb/DiffLine'
 
 export interface DiffPayload {
   filePath: string

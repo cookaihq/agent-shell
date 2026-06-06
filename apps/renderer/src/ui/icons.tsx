@@ -53,6 +53,48 @@ export const IconPaperclip = ({ size = 15 }: SvgProps) => (
   </svg>
 )
 
+// ── Projects 工具栏 / 选择态 / 看板图标（path 1:1 来自原型 app.js projects IIFE） ──
+export const IconSearch = ({ size = 13 }: SvgProps) => (
+  <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round">
+    <circle cx="11" cy="11" r="7" /><path d="M21 21l-4-4" />
+  </svg>
+)
+export const IconGrid = ({ size = 14 }: SvgProps) => (
+  <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+    <rect x="4" y="4" width="7" height="7" rx="1" /><rect x="13" y="4" width="7" height="7" rx="1" /><rect x="4" y="13" width="7" height="7" rx="1" /><rect x="13" y="13" width="7" height="7" rx="1" />
+  </svg>
+)
+export const IconKanban = ({ size = 14 }: SvgProps) => (
+  <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+    <rect x="3" y="4" width="6" height="16" rx="1" /><rect x="10" y="4" width="6" height="10" rx="1" /><rect x="17" y="4" width="4" height="7" rx="1" />
+  </svg>
+)
+export const IconCheck = ({ size = 13 }: SvgProps) => (
+  <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={3} strokeLinecap="round" strokeLinejoin="round">
+    <path d="M5 12l5 5L20 7" />
+  </svg>
+)
+export const IconMore = ({ size = 16 }: SvgProps) => (
+  <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor">
+    <circle cx="5" cy="12" r="1.5" /><circle cx="12" cy="12" r="1.5" /><circle cx="19" cy="12" r="1.5" />
+  </svg>
+)
+export const IconPencil = ({ size = 12 }: SvgProps) => (
+  <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z" />
+  </svg>
+)
+export const IconSort = ({ size = 14 }: SvgProps) => (
+  <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+    <path d="M7 4v15M7 4L4 7M7 4l3 3" /><path d="M17 20V5M17 20l-3-3M17 20l3-3" />
+  </svg>
+)
+export const IconCaret = ({ size = 13 }: SvgProps) => (
+  <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+    <path d="M6 9l6 6 6-6" />
+  </svg>
+)
+
 export const EngIcon = ({ engine }: { engine: 'claude' | 'codex' }) => {
   if (engine === 'claude') {
     return (

@@ -7,7 +7,7 @@ import { startDaemon, type DaemonServer } from '../../server'
 import { openDatabase } from '../../db/database'
 import { createProject, listProjects } from '../../db/projects'
 import { createSession } from '../../db/sessions'
-import { appendMessage, getMessages as getMsgs } from '../../db/messages'
+import { SessionRuntime } from '../../session/sessionRuntime'
 import { recordUsage } from '../../db/usage'
 import { appendRecord, readRecords } from '../../session/transcript'
 
@@ -108,7 +108,8 @@ describe('会话路由', () => {
     expect(list.find((s) => s.id === sessionId)).toMatchObject({ permissionMode: 'plan', effort: 'max' })
   })
 
-  it('GET /sessions/:id/messages：按插入顺序返回历史消息', async () => {
+  // §8：端点改发原始 records（重建职责下沉 renderer 切片 historyService）。
+  it('GET /sessions/:id/messages：按插入顺序返回原始 records', async () => {
     const db = openDatabase(':memory:')
     const proj = createProject(db, { name: 'p', path: '/w' })
     const s = createSession(db, { projectId: proj.id, engine: 'claude', model: 'opus' })
@@ -116,10 +117,11 @@ describe('会话路由', () => {
     appendRecord(tdir, s.id, 'claude', 'user_prompt', { text: 'hi', attachments: [] })
     server = await startWith(db, tdir)
     const res = await fetch(server.url + `/sessions/${s.id}/messages`)
-    expect((await res.json() as { messages: any[] }).messages[0].role).toBe('user')
+    const { records } = await res.json() as { records: any[] }
+    expect(records[0]).toMatchObject({ engine: 'claude', type: 'user_prompt', raw: { text: 'hi' } })
   })
 
-  it('GET /sessions/:id/messages：重建 claude 回合，sdkMessageId 正确', async () => {
+  it('GET /sessions/:id/messages：原样返回一轮 claude 记录（含 assistant 原始流 + assistant_blocks）', async () => {
     const db = openDatabase(':memory:')
     const proj = createProject(db, { name: 'p', path: '/w' })
     const s = createSession(db, { projectId: proj.id, engine: 'claude', model: 'opus' })
@@ -130,9 +132,10 @@ describe('会话路由', () => {
     appendRecord(tdir, s.id, 'claude', 'result', { type: 'result', is_error: false, stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 } })
     server = await startWith(db, tdir)
     const res = await fetch(server.url + `/sessions/${s.id}/messages`)
-    const { messages } = await res.json() as { messages: any[] }
-    expect(messages.map((m: any) => m.role)).toEqual(['user', 'assistant'])
-    expect(messages[1].sdkMessageId).toBe('m1')
+    const { records } = await res.json() as { records: any[] }
+    expect(records.map((r: any) => r.type)).toEqual(['user_prompt', 'assistant', 'assistant_blocks', 'result'])
+    // msg_id 提取下沉 renderer claude 切片，端点不再回吐 sdkMessageId，但原始 assistant 记录原样带 message.id
+    expect(records[1].raw.message.id).toBe('m1')
   })
 
   it('GET /sessions/:id/raw：找到记录 / 缺 msgId 400 / 未知 msgId 404', async () => {
@@ -410,18 +413,17 @@ describe('轻量写端点', () => {
     server = await startWith()
     expect((await fetch(server.url + '/sessions/nope/usage')).status).toBe(404)
   })
-  it('DELETE /sessions/:id → 200，会话连同 messages/usage 一并删除', async () => {
+  it('DELETE /sessions/:id → 200，会话连同 usage 一并删除', async () => {
     const db = openDatabase(':memory:')
     const proj = createProject(db, { name: 'p', path: '/w' })
     const s = createSession(db, { projectId: proj.id, engine: 'claude', model: 'opus' })
-    appendMessage(db, { sessionId: s.id, role: 'user', blocks: [{ type: 'text', text: 'hi' }] })
     recordUsage(db, { sessionId: s.id, turn: 1, inputTokens: 1, outputTokens: 1, costUsd: 0 })
     server = await startWith(db)
     const res = await fetch(server.url + `/sessions/${s.id}`, { method: 'DELETE' })
     expect(res.status).toBe(200)
     const { getSession: gs } = await import('../../db/sessions')
     expect(gs(db, s.id)).toBeUndefined()
-    expect(getMsgs(db, s.id)).toEqual([])
+    expect((db.prepare('SELECT COUNT(*) AS c FROM usage WHERE session_id = ?').get(s.id) as { c: number }).c).toBe(0)
   })
   it('DELETE /sessions/:id 不存在 → 404', async () => {
     server = await startWith()
@@ -483,5 +485,51 @@ describe('GET /sessions/:id/stream (SSE)', () => {
     expect(collected).toContain('"text":"答"')
     ac.abort()
     await reader.cancel().catch(() => {})
+  })
+})
+
+describe('斜杠命令路由（无会话取数 + 契约非 null）', () => {
+  const PROBED = [{ name: 'plan', description: '计划模式', argumentHint: '' }]
+  /** 注入带假探针的 SessionRuntime（route 成功路径不真起 claude）。 */
+  function startWithProbe(db: import('better-sqlite3').Database) {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'as-cmd-'))
+    const runtime = new SessionRuntime({ db, resolveBin: () => '/x/bin', probeCommandsFn: async () => PROBED })
+    return startDaemon({ detect: () => ({ claude: '/x/claude', codex: '/x/codex' }), db, projectsDir: tmp, runtime })
+  }
+
+  it('GET /projects/:id/commands：无会话项目 → 走探针返回命令数组', async () => {
+    const db = openDatabase(':memory:')
+    const proj = createProject(db, { name: 'p', path: '/w' })
+    server = await startWithProbe(db)
+    const res = await fetch(server.url + `/projects/${proj.id}/commands`)
+    expect(res.status).toBe(200)
+    expect((await res.json() as { commands: any[] }).commands).toEqual(PROBED)
+  })
+
+  it('GET /projects/:id/commands：项目不存在 → 404 not_found', async () => {
+    const db = openDatabase(':memory:')
+    server = await startWithProbe(db)
+    const res = await fetch(server.url + '/projects/nope/commands')
+    expect(res.status).toBe(404)
+    expect((await res.json() as any).error.code).toBe('not_found')
+  })
+
+  it('GET /sessions/:id/commands：无活查询会话 → 探针兜底返回数组（契约非 null）', async () => {
+    const db = openDatabase(':memory:')
+    const proj = createProject(db, { name: 'p', path: '/w' })
+    const sess = createSession(db, { projectId: proj.id, engine: 'claude', model: 'opus' })
+    server = await startWithProbe(db)
+    const res = await fetch(server.url + `/sessions/${sess.id}/commands`)
+    expect(res.status).toBe(200)
+    const body = await res.json() as { commands: any }
+    expect(Array.isArray(body.commands)).toBe(true)
+    expect(body.commands).toEqual(PROBED)
+  })
+
+  it('GET /sessions/:id/commands：会话不存在 → 404 not_found', async () => {
+    const db = openDatabase(':memory:')
+    server = await startWithProbe(db)
+    const res = await fetch(server.url + '/sessions/nope/commands')
+    expect(res.status).toBe(404)
   })
 })

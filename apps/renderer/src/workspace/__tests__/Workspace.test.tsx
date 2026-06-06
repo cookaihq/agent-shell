@@ -27,15 +27,10 @@ vi.mock('../../hooks/useFsWatch', () => ({ useFsWatch: () => {} }))
 vi.mock('../../api/client', () => ({
   ApiError: class extends Error {},
   api: {
+    // §8：端点回吐原始 transcript records；Workspace 经切片 historyService.rebuildBlocks 重建成 MessageDTO
     messages: vi.fn().mockResolvedValue({
-      messages: [
-        {
-          id: 'm1',
-          sessionId: 's1',
-          role: 'user',
-          blocks: [{ type: 'text', text: '历史消息' }],
-          createdAt: 0,
-        },
+      records: [
+        { ts: 0, engine: 'claude', type: 'user_prompt', raw: { text: '历史消息', attachments: [] } },
       ],
     }),
     status: vi.fn().mockResolvedValue({ running: false, status: 'completed' }),
@@ -44,6 +39,8 @@ vi.mock('../../api/client', () => ({
     files: vi.fn().mockResolvedValue({ tree: [] }),
     // Issue 5: Composer 内用 api.listSkills 加载技能候选
     listSkills: vi.fn().mockResolvedValue({ skills: [] }),
+    // P2 命令源：Composer 内 useEffect 调 api.commands 拉斜杠命令（无活会话 → null）
+    commands: vi.fn().mockResolvedValue({ commands: null }),
     submit: vi.fn().mockResolvedValue(undefined),
     interrupt: vi.fn().mockResolvedValue(undefined),
     resume: vi.fn().mockResolvedValue(undefined),
@@ -76,7 +73,7 @@ const defaultProps = {
 describe('Workspace', () => {
   it('进会话后渲染历史消息', async () => {
     render(<SettingsProvider><Workspace {...defaultProps} /></SettingsProvider>)
-    // 顶部「最近发送」固定条会复制最后一条 user 文本 → 消息体 + 固定条共两处
+    // 用户消息渲染在消息体（用户消息白底框本身 sticky 贴顶，无单独摘要栏）
     expect((await screen.findAllByText('历史消息')).length).toBeGreaterThan(0)
   })
 
@@ -117,11 +114,8 @@ describe('Workspace', () => {
       },
     ]
     render(<SettingsProvider><Workspace {...defaultProps} sessions={sessions} /></SettingsProvider>)
-    // ChatHeader renders hist-count badge (should show done count)
+    // ChatHeader renders sessions（历史消息 列表可见）
     await screen.findAllByText('历史消息')
-    // hist-count visible with at least one done session
-    const histCount = document.querySelector('#histCount')
-    expect(histCount).toBeTruthy()
   })
 
   it('含 .split 容器 + .split-handle + Composer + file-workspace 占位', async () => {
@@ -132,5 +126,17 @@ describe('Workspace', () => {
     // Task 15: 占位 div 已替换为真实 Composer（根 .composer，含 textarea）
     expect(container.querySelector('.composer')).toBeTruthy()
     expect(container.querySelector('[data-testid="file-workspace"]')).toBeTruthy()
+  })
+
+  it('运行时档位 → 回调 onRuntimeChange 同步 session 快照（修「切回没保持」）', async () => {
+    const onRuntimeChange = vi.fn()
+    await act(async () => {
+      render(<SettingsProvider><Workspace {...defaultProps} model="opus" onRuntimeChange={onRuntimeChange} /></SettingsProvider>)
+    })
+    await screen.findAllByText('历史消息')
+    // 挂载即用当前中立档位回调（sessionId + model/permissionMode/effort）→ AppNav 据此同步快照，切回不回退
+    expect(onRuntimeChange).toHaveBeenCalledWith('s1', expect.objectContaining({
+      model: 'opus', permissionMode: expect.any(String), effort: expect.any(String),
+    }))
   })
 })

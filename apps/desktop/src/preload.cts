@@ -12,6 +12,8 @@ const TABS_GET = 'agent-shell:tabs-get'
 const TABS_SET = 'agent-shell:tabs-set'
 const OPEN_PATH = 'agent-shell:open-path'
 const OPEN_EXTERNAL = 'agent-shell:open-external'
+const TRASH_ITEM = 'agent-shell:trash-item'
+const SHOW_ITEM = 'agent-shell:show-item'
 
 const bridge: AgentShellBridge = {
   // 同步取主进程持有的 per-process 会话密钥：preload 早于 renderer JS 执行，
@@ -28,6 +30,10 @@ const bridge: AgentShellBridge = {
     ipcRenderer.invoke(OPEN_PATH, absPath) as Promise<{ ok: boolean; error?: string }>,
   openExternal: (url: string) =>
     ipcRenderer.invoke(OPEN_EXTERNAL, url) as Promise<{ ok: boolean; error?: string }>,
+  trashItem: (absPaths: string[]) =>
+    ipcRenderer.invoke(TRASH_ITEM, absPaths) as Promise<{ ok: boolean; failed: string[] }>,
+  showItemInFolder: (absPath: string) =>
+    ipcRenderer.invoke(SHOW_ITEM, absPath) as Promise<{ ok: boolean; error?: string }>,
 }
 
 contextBridge.exposeInMainWorld('agentShell', bridge)

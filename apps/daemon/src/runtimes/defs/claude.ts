@@ -8,7 +8,7 @@ export const claudeDef: RuntimeAgentDef = {
   promptInputFormat: 'stream-json',
   closeStdinAfterPrompt: false,   // 常驻进程，关 stdin 是 M4 的活
   turnBoundary: 'event',          // result/turn_end 划界，不靠进程退出
-  authStrategy: { apiKeyEnv: 'ANTHROPIC_API_KEY', baseUrlEnv: 'ANTHROPIC_BASE_URL' },
+  authStrategy: { apiKeyEnv: 'ANTHROPIC_API_KEY', baseUrlEnv: 'ANTHROPIC_BASE_URL', altKeyEnv: 'ANTHROPIC_AUTH_TOKEN' },
   buildArgs(opts: BuildArgsOpts): string[] {
     const args = [
       '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',

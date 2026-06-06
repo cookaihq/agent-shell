@@ -1,5 +1,5 @@
 // Home.tsx — 入口屏，对照 home.html L19-53
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useMemo, useEffect } from 'react'
 import type { ProjectDTO } from '../api/types'
 import { ProjectCard } from './ProjectCard'
 import { IconPaperclip } from '../ui/icons'
@@ -63,7 +63,18 @@ export function Home({ projects, onSend, onOpenProject, onViewAll, skillCount, o
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() }
   }
 
-  const chips: AttachChip[] = staged.map((s) => ({ name: s.name, kind: s.kind === 'path' && s.isDir ? 'dir' : 'file' }))
+  // 粘贴的图片还没上传（无项目/无 URL），用 blob 临时对象 URL 出缩略图；staged 变更时释放旧的，避免泄漏
+  const previewUrls = useMemo(
+    () => staged.map((s) => (s.kind === 'blob' && s.blob.type.startsWith('image/') ? URL.createObjectURL(s.blob) : undefined)),
+    [staged],
+  )
+  useEffect(() => () => { previewUrls.forEach((u) => u && URL.revokeObjectURL(u)) }, [previewUrls])
+
+  const chips: AttachChip[] = staged.map((s, i) => ({
+    name: s.name,
+    kind: s.kind === 'path' && s.isDir ? 'dir' : 'file',
+    previewUrl: previewUrls[i],
+  }))
 
   return (
     <div className="home">

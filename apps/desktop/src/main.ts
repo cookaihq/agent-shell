@@ -1,11 +1,12 @@
 import path from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { readFileSync, writeFileSync } from 'node:fs'
-import { app, BrowserWindow, ipcMain, dialog, Menu, shell, type MenuItemConstructorOptions } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, Menu, Tray, nativeImage, shell, type MenuItemConstructorOptions } from 'electron'
 import { DESKTOP_IPC } from '@agent-shell/contracts'
 import { discoverDaemonUrl } from '@agent-shell/sidecar'
 import { startDaemonProcess, type DaemonHandle } from './daemonProcess'
 import { initUpdater } from './updater'
+import { startAutomationNotifier, type AutomationNotifier } from './automationNotify'
 
 // 说明：本文件经 esbuild 打成 CJS（dist/main.cjs），上面的具名导入会被转成
 // `require('electron')`——这是 Electron 主进程注入内置 electron 模块的标准可靠路径
@@ -30,6 +31,13 @@ function writeTabsState(json: string): void {
 }
 
 let daemon: DaemonHandle | null = null
+// 托盘常驻：关窗不退、daemon 存活、调度器照跑（spec §2）。仅托盘「退出」/ Cmd+Q 置 isQuitting 才真退。
+let tray: Tray | null = null
+let mainWindow: BrowserWindow | null = null
+let isQuitting = false
+// 当前 daemon URL（URL 发现轮询写入）：托盘重开窗口 / 通知点击重建窗口时直接复用，无需重新等发现。
+let currentDaemonUrl: string | null = null
+let notifier: AutomationNotifier | null = null
 
 // 自定义标题栏：仅 mac 隐藏原生标题栏、让自定义 chrome 栏上提为最顶行，
 // 系统红黄绿按钮保留并手动定位（对齐参考实现 open-design runtime.ts MAC_WINDOW_CHROME）。
@@ -150,7 +158,7 @@ function pendingHtml(): string {
 // URL 发现轮询：先单次探测（短超时包住 discoverDaemonUrl 的轮询，取不到即 null），
 // 取到且与当前不同 → loadURL 切到真页面；之后继续低频轮询，daemon 重启换端口也能自愈。
 function startUrlDiscoveryLoop(win: BrowserWindow): void {
-  let currentUrl: string | null = null
+  let loadedUrl: string | null = null
   const probe = async (): Promise<string | null> => {
     try { return await discoverDaemonUrl({ namespace: DAEMON_NAMESPACE, timeoutMs: 200, intervalMs: 60 }) }
     catch { return null }
@@ -158,10 +166,15 @@ function startUrlDiscoveryLoop(win: BrowserWindow): void {
   const tick = async (): Promise<void> => {
     if (win.isDestroyed()) return
     const url = await probe()
-    if (url && url !== currentUrl && !win.isDestroyed()) {
-      currentUrl = url
-      try { await win.loadURL(url + '/') }
-      catch (err) { console.error('[desktop] 加载 daemon URL 失败:', err) }
+    if (url) {
+      currentDaemonUrl = url                    // 记最新 URL（托盘重开 / 通知点击复用）
+      if (url !== loadedUrl && !win.isDestroyed()) {
+        loadedUrl = url
+        try { await win.loadURL(url + '/') }
+        catch (err) { console.error('[desktop] 加载 daemon URL 失败:', err) }
+      }
+      // 首次拿到 URL → 起自动化通知订阅（跨 daemon 重启自愈：URL 变了会重订阅）
+      ensureNotifier(url)
     }
     if (win.isDestroyed()) return
     setTimeout(() => { void tick() }, url ? RUNNING_POLL_MS : PENDING_POLL_MS)
@@ -169,7 +182,15 @@ function startUrlDiscoveryLoop(win: BrowserWindow): void {
   void tick()
 }
 
-async function createWindow(): Promise<void> {
+/** 起 / 重指向自动化通知订阅（daemon SSE → 系统通知）。URL 变更（daemon 重启换端口）时重订阅。 */
+function ensureNotifier(url: string): void {
+  if (notifier && notifier.url === url) return
+  notifier?.stop()
+  notifier = startAutomationNotifier({ url, authSecret, onActivate: () => showMainWindow() })
+}
+
+// IPC 句柄一次性注册（whenReady 调一次）：ipcMain.handle 重复注册会抛错，故不能放进可被托盘多次调用的 createWindow。
+function registerIpcHandlers(): void {
   // sendSync 取密钥：preload 同步拿，renderer 首请求前就绪
   ipcMain.on(DESKTOP_IPC.authToken, (e) => { e.returnValue = authSecret })
   // 原生文件夹选择器：返回所选绝对路径或 null（取消）
@@ -197,7 +218,26 @@ async function createWindow(): Promise<void> {
     try { await shell.openExternal(url); return { ok: true } }
     catch (e) { return { ok: false, error: e instanceof Error ? e.message : 'open failed' } }
   })
+  // 把一组绝对路径移到系统废纸篓（可恢复删除）。逐个 shell.trashItem，失败项收进 failed[] 回报前端提示。
+  // 路径由 daemon abs-path（带越界校验）解析得到，renderer 不自拼路径，与现有 openPath 一致。
+  ipcMain.handle(DESKTOP_IPC.trashItem, async (_e, absPaths: unknown) => {
+    if (!Array.isArray(absPaths)) return { ok: false, failed: [] as string[] }
+    const failed: string[] = []
+    for (const p of absPaths) {
+      if (typeof p !== 'string' || !p) continue
+      try { await shell.trashItem(p) } catch { failed.push(p) }   // trashItem 出错会 reject
+    }
+    return { ok: failed.length === 0, failed }
+  })
+  // 在系统文件管理器（Finder）中定位并选中某绝对路径（shell.showItemInFolder 同步无返回）。
+  ipcMain.handle(DESKTOP_IPC.showItemInFolder, async (_e, absPath: unknown) => {
+    if (typeof absPath !== 'string' || !absPath) return { ok: false, error: 'invalid path' }
+    try { shell.showItemInFolder(absPath); return { ok: true } }
+    catch (e) { return { ok: false, error: e instanceof Error ? e.message : 'show failed' } }
+  })
+}
 
+async function createWindow(): Promise<void> {
   const win = new BrowserWindow({
     width: 1280,
     height: 860,
@@ -209,6 +249,8 @@ async function createWindow(): Promise<void> {
       preload: path.resolve(__dirname, 'preload.cjs'),
     },
   })
+  mainWindow = win
+  win.on('closed', () => { if (mainWindow === win) mainWindow = null })
   installMacChromeCss(win)
 
   // 右键菜单（Issue 18）：选中文字 → 复制；输入框 → 剪切/复制/粘贴/全选（editFlags 驱动）。
@@ -231,14 +273,54 @@ async function createWindow(): Promise<void> {
     Menu.buildFromTemplate(template).popup({ window: win })
   })
 
-  // 先上加载页，立刻有反馈；再 spawn daemon（不阻塞），由轮询在其就绪后切到真页面。
-  await win.loadURL(pendingHtml())
-  daemon = startDaemonProcess({ webDir, namespace: DAEMON_NAMESPACE, authSecret, dataDir: DATA_DIR, projectsDir: PROJECTS_DIR })
+  // 重开窗口（托盘/通知点击）时 daemon 已在跑、URL 已知 → 直接加载真页面，免再过加载页。
+  // 首次启动 daemon 未起 → 先上加载页，spawn daemon，轮询就绪后切真页。
+  if (currentDaemonUrl) {
+    try { await win.loadURL(currentDaemonUrl + '/') }
+    catch { await win.loadURL(pendingHtml()) }
+  } else {
+    await win.loadURL(pendingHtml())
+  }
+  if (!daemon) daemon = startDaemonProcess({ webDir, namespace: DAEMON_NAMESPACE, authSecret, dataDir: DATA_DIR, projectsDir: PROJECTS_DIR })
   startUrlDiscoveryLoop(win)
 }
 
+/** 托盘「打开」/ 通知点击：有窗口 → 还原+聚焦；无窗口 → 重建（daemon 仍在跑）。 */
+function showMainWindow(): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.show()
+    mainWindow.focus()
+    return
+  }
+  void createWindow()
+}
+
+// 托盘图标（18×18 单色圆点模板 PNG，内联 base64）：自包含、保证有效，mac 模板图自动适配深浅色。
+// 不依赖 .icns（nativeImage.createFromPath 对 icns 支持不可靠），打包/ dev 一致。
+const TRAY_ICON_PNG = 'iVBORw0KGgoAAAANSUhEUgAAABIAAAASCAYAAABWzo5XAAAAPklEQVR42mNgGEpgAQ5MliH/0TBJhmEzAJuBFBtC0LAFZBi0gFLX4HXVMDeIKoFNteinaoKkahahaqYdOAAALXaLEZmo0u0AAAAASUVORK5CYII='
+
+/** 菜单栏托盘（spec §2）：常驻入口，关窗后仍可重开 / 真退。 */
+function createTray(): void {
+  if (tray) return
+  const image = nativeImage.createFromDataURL(`data:image/png;base64,${TRAY_ICON_PNG}`)
+  if (process.platform === 'darwin') image.setTemplateImage(true)
+  tray = new Tray(image)
+  tray.setToolTip('Agent Shell')
+  const menu = Menu.buildFromTemplate([
+    { label: '打开 Agent Shell', click: () => showMainWindow() },
+    { type: 'separator' },
+    { label: '退出', click: () => { isQuitting = true; app.quit() } },
+  ])
+  tray.setContextMenu(menu)
+  // 单击托盘图标也重开窗口（Windows/Linux 习惯；mac 双击）
+  tray.on('click', () => showMainWindow())
+}
+
 app.whenReady().then(async () => {
-  installAppMenu()   // 系统菜单栏（替换 Electron 默认菜单）
+  installAppMenu()        // 系统菜单栏（替换 Electron 默认菜单）
+  registerIpcHandlers()   // IPC 句柄一次性注册（createWindow 可被托盘多次调用，不能在那注册）
+  createTray()            // 菜单栏托盘常驻入口
   await createWindow()
   if (!IS_DEV_CHANNEL) initUpdater()   // dev 渠道不查更新（不引导去下正式版）；正式版照旧仅打包态查
 }).catch((err) => {
@@ -246,13 +328,19 @@ app.whenReady().then(async () => {
   app.quit()
 })
 
-// 窗口全关 → 关停 daemon → 退出（mac 习惯保留 dock，但 M8a 先简单全退）
-app.on('window-all-closed', async () => {
-  if (daemon) await daemon.stop()
-  app.quit()
+// 窗口全关 → 缩托盘常驻（spec §2）：销毁窗口释放渲染进程内存，主进程 + daemon 继续活、调度器照跑。
+// 仅 isQuitting（托盘「退出」/ Cmd+Q）时才真退。mac 本就不在关窗时退；这里统一让所有平台关窗都留托盘。
+app.on('window-all-closed', () => {
+  if (isQuitting) app.quit()
+  // 否则什么都不做：留在托盘后台守时
 })
 
-app.on('before-quit', async () => { if (daemon) await daemon.stop() })
+// Cmd+Q / 系统退出 / 托盘退出都经此：置 isQuitting（让 window-all-closed 走真退），停通知订阅 + daemon。
+app.on('before-quit', async () => {
+  isQuitting = true
+  notifier?.stop()
+  if (daemon) await daemon.stop()
+})
 
 // 兜底：主进程未捕获异常 / 正常 exit 时，同步强杀 daemon 子进程，避免孤儿进程累积。
 // 注：主进程被 SIGKILL 时无法运行任何回调，该场景的孤儿需子进程侧自我守护（M8 后续硬化）。

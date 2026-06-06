@@ -103,4 +103,21 @@ describe('Preview', () => {
       expect(container.querySelector('.preview-stage')).toBeTruthy()
     })
   })
+
+  it('打开文件 → 地址栏显示项目内相对路径，且无独立文件名标签（Issue 9）', async () => {
+    ;(api.file as ReturnType<typeof vi.fn>).mockResolvedValue({ path: 'docs/api-guide.md', content: '# API', truncated: false })
+    const { container } = render(<Preview projectId="p1" activeFile="docs/api-guide.md" />)
+    const input = container.querySelector('.preview-addr-input') as HTMLInputElement
+    await waitFor(() => expect(input.value).toBe('docs/api-guide.md'))
+    expect(container.querySelector('.preview-fname')).toBeNull()
+  })
+
+  it('不改地址栏（仍是文件路径）直接提交 → 不进浏览器模式（Issue 9）', async () => {
+    ;(api.file as ReturnType<typeof vi.fn>).mockResolvedValue({ path: 'docs/api-guide.md', content: '# API', truncated: false })
+    const { container } = render(<Preview projectId="p1" activeFile="docs/api-guide.md" />)
+    const input = container.querySelector('.preview-addr-input') as HTMLInputElement
+    await waitFor(() => expect(input.value).toBe('docs/api-guide.md'))
+    fireEvent.submit(input.closest('form')!)
+    expect(container.querySelector('iframe.preview-iframe')).toBeNull()
+  })
 })

@@ -18,14 +18,9 @@
 import { useState, useCallback } from 'react'
 import type { KeyboardEvent } from 'react'
 
-// ── 静态命令集（app.js CMDS L672-678）────────────────────────────────────────
-const CMDS = [
-  { name: 'clear',   desc: '清空当前会话' },
-  { name: 'compact', desc: '压缩上下文，保留摘要' },
-  { name: 'plan',    desc: '进入计划模式，先看不改' },
-  { name: 'review',  desc: '审查当前改动' },
-  { name: 'init',    desc: '初始化项目记忆 CLAUDE.md' },
-]
+// ── 命令项类型（命令源由 Composer 从 SDK supportedCommands 动态注入，不再写死）──────────
+// name=命令名（无前导 /），desc=描述（取自 SlashCommand.description）。
+export interface CommandItem { name: string; desc: string }
 
 // ── 图标类型标识（MentionPop 据此渲染对应 SVG）────────────────────────────────
 export type IconKind = 'folder' | 'file' | 'skill' | 'cmd'
@@ -62,7 +57,7 @@ function detect(ta: HTMLTextAreaElement): DetectResult | null {
   }
 }
 
-function buildItems(d: DetectResult, filePaths: string[], skillNames: string[]): MentionItem[] {
+function buildItems(d: DetectResult, filePaths: string[], skillNames: string[], commandList: CommandItem[]): MentionItem[] {
   const out: MentionItem[] = []
   if (d.trig === '@') {
     // 文件候选：拍平路径列表
@@ -83,7 +78,7 @@ function buildItems(d: DetectResult, filePaths: string[], skillNames: string[]):
       .forEach(s => out.push({ insert: '@' + s, group: '技能', icon: 'skill', label: s }))
   } else {
     // 命令候选
-    CMDS
+    commandList
       .filter(c => c.name.toLowerCase().includes(d.query))
       .forEach(c => out.push({ insert: '/' + c.name, icon: 'cmd', label: '/' + c.name, desc: c.desc }))
   }
@@ -104,16 +99,16 @@ interface MentionState {
 
 const CLOSED: MentionState = { open: false, trig: null, query: '', items: [], activeIndex: 0, qStart: 0 }
 
-export function useMention(filePaths: string[], skillNames: string[]) {
+export function useMention(filePaths: string[], skillNames: string[], commandList: CommandItem[]) {
   const [state, setState] = useState<MentionState>(CLOSED)
 
   const onInput = useCallback((ta: HTMLTextAreaElement) => {
     const d = detect(ta)
     if (!d) { setState(CLOSED); return }
-    const items = buildItems(d, filePaths, skillNames)
+    const items = buildItems(d, filePaths, skillNames, commandList)
     if (!items.length) { setState(CLOSED); return }
     setState({ open: true, trig: d.trig, query: d.query, items, activeIndex: 0, qStart: d.start })
-  }, [filePaths, skillNames])
+  }, [filePaths, skillNames, commandList])
 
   const hide = useCallback(() => setState(CLOSED), [])
 

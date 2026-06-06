@@ -89,4 +89,31 @@ describe('AgentEvent', () => {
     const ev = { type: 'turn_end', stopReason: 'end_turn', sdkMessageId: 'msg_1', sdkUuid: 'u1' }
     expect(AgentEvent.parse(ev)).toMatchObject({ sdkMessageId: 'msg_1', sdkUuid: 'u1' })
   })
+
+  it('UsageEvent 支持 contextTokens + contextWindowIsAuthoritative（可选）', () => {
+    const ev = { type: 'usage', inputTokens: 1, outputTokens: 2, contextTokens: 36000, contextWindow: 200000, contextWindowIsAuthoritative: true }
+    expect(AgentEvent.parse(ev)).toMatchObject({ contextTokens: 36000, contextWindowIsAuthoritative: true })
+  })
+
+  it('turn_start / context_compacted 为合法 AgentEvent', () => {
+    expect(AgentEvent.parse({ type: 'turn_start' })).toEqual({ type: 'turn_start' })
+    expect(AgentEvent.parse({ type: 'context_compacted' })).toEqual({ type: 'context_compacted' })
+  })
+
+  // ── NeutralTool 中立工具字段（codex 隔离，§11#1）────────────────────────────
+  it('tool_use 带 tool:"bash" 解析成功，.tool === "bash"', () => {
+    const e = AgentEvent.parse({ type: 'tool_use', id: 't', name: 'shell', input: {}, tool: 'bash' })
+    expect(e.type).toBe('tool_use')
+    expect((e as any).tool).toBe('bash')
+  })
+
+  it('tool_use 不带 tool 字段仍可解析（向后兼容 / claude 降级路径）', () => {
+    const e = AgentEvent.parse({ type: 'tool_use', id: 't2', name: 'Read', input: {} })
+    expect(e.type).toBe('tool_use')
+    expect((e as any).tool).toBeUndefined()
+  })
+
+  it('tool_use 带非法 tool 值拒绝解析', () => {
+    expect(() => AgentEvent.parse({ type: 'tool_use', id: 't3', name: 'x', input: {}, tool: 'generic' })).toThrow()
+  })
 })

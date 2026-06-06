@@ -34,6 +34,22 @@ export function renameProject(db: Database.Database, id: string, name: string): 
   db.prepare('UPDATE projects SET name = ? WHERE id = ?').run(name, id)
 }
 
+/**
+ * 硬删项目：事务内级联删该项目的全部会话（usage + sessions），再删项目行。
+ * 对齐 deleteSession 的级联写法（usage 仅靠 session_id 关联、无外键 CASCADE，须手动删）。
+ * 返回项目行是否真的删掉（不存在 → false）。磁盘目录的删除由调用方（路由层）负责，DB 与文件分离。
+ */
+export function deleteProject(db: Database.Database, id: string): boolean {
+  const sessions = getSessionsByProject(db, id)
+  return db.transaction(() => {
+    for (const s of sessions) {
+      db.prepare('DELETE FROM usage WHERE session_id = ?').run(s.id)
+      db.prepare('DELETE FROM sessions WHERE id = ?').run(s.id)
+    }
+    return db.prepare('DELETE FROM projects WHERE id = ?').run(id).changes > 0
+  })()
+}
+
 export interface ProjectWithStatus extends ProjectRow {
   status: ProjectStatus
   engine: Engine

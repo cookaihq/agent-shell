@@ -1,33 +1,43 @@
 /**
- * RuntimeSwitcher.tsx — proj-bar 右上角的运行时切换器
+ * RuntimeSwitcher.tsx — proj-bar 右上角的运行时切换器（外壳件，零 Agent 分支）
  *
- * DOM 结构 1:1 对照 prototype/原型开发版/app.js renderSwitcher L58-83
- * 弹窗开合逻辑移植自 wirePopover L315-325 + 外部点击关闭 L328-333
- * 切换 dispatch 移植自 chip 内部交互 L336-345
+ * 代理网格固定列「本机 CLI」两个引擎（claude/codex），点切 SET_AGENT；
+ * 模型下拉用当前引擎切片 chatUIConfig.getModelOptions（动态优先），展示名走 getModelLabel。
+ * 引擎图标走切片无关的 EngIcon（按 engine 取图）。
  *
- * M7a：切换只改前端状态，不调任何后端 api。
+ * 切换只改前端状态，不调任何后端 api（动态模型列表除外）。
  */
 
 import React, { useEffect, useRef, useState } from 'react'
 import { api } from '../api/client'
-import { useRuntime, CLI_MODELS, AGENT_LABEL, modelLabel } from './runtimeState'
+import { useRuntime, AGENT_LABEL, slotsOf } from './runtimeState'
+import { SLICES } from './agents/registry'
+import type { Engine } from '../api/types'
 import type { DynModel } from './ModelPill'
 import { EngIcon } from '../ui/icons'
 import { useSettings } from '../settings/SettingsContext'
 
-// 代理 icon 背景色（对应原型 AGENT_ICON_BG）
+// 代理 icon 背景色（按 engine 取；中立映射，非分支逻辑）
 const AGENT_ICON_BG: Record<string, string> = {
   claude: 'var(--accent)',
   codex: 'var(--blue)',
 }
 
+// 代理网格列：枚举已注册切片（SLICES），名取 AGENT_LABEL——不硬编码引擎清单。
+const AGENTS: { engine: Engine; name: string }[] = (Object.keys(SLICES) as Engine[]).map((engine) => ({
+  engine,
+  name: AGENT_LABEL[engine] ?? engine,
+}))
+
 export function RuntimeSwitcher({ sessionId }: { sessionId?: string } = {}) {
   const { runtime, dispatch } = useRuntime()
   const { openSettings } = useSettings()
   const [open, setOpen] = useState(false)
-  // 动态模型列表（claude）：来自活动会话 supportedModels；null=无活会话 → 回落静态 CLI_MODELS（Issue 12）
+  // 动态模型列表：来自活动会话 supportedModels；null=无活会话 → 回落静态（Issue 12）
   const [dynModels, setDynModels] = useState<DynModel[] | null>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
+
+  const ui = SLICES[runtime.engine].chatUIConfig
 
   // 点外部关闭（移植 wirePopover 外部 click + L328-333）
   useEffect(() => {
@@ -40,24 +50,21 @@ export function RuntimeSwitcher({ sessionId }: { sessionId?: string } = {}) {
     return () => document.removeEventListener('click', handler)
   }, [])
 
-  // 打开弹窗时拉一次 supportedModels（仅 claude 有活动会话）
+  // 打开弹窗时拉一次 supportedModels（仅支持动态的切片有活动会话）
   useEffect(() => {
-    if (!open || !sessionId || runtime.agent !== 'claude') return
+    if (!open || !sessionId || !ui.supportsDynamicModels) return
     let off = false
     api.models(sessionId).then((r) => { if (!off) setDynModels(r.models) }).catch(() => {})
     return () => { off = true }
-  }, [open, sessionId, runtime.agent])
+  }, [open, sessionId, ui.supportsDynamicModels])
 
   const toggleOpen = (e: React.MouseEvent) => {
     e.stopPropagation()
     setOpen(prev => !prev)
   }
 
-  // claude 有动态模型 → 用 {value,displayName}；否则回落静态展示名
-  const dynamic = runtime.agent === 'claude' && dynModels && dynModels.length > 0 ? dynModels : null
-  const modelList: { value: string; label: string }[] = dynamic
-    ? dynamic.map((m) => ({ value: m.value, label: m.displayName }))
-    : (CLI_MODELS[runtime.agent] ?? []).map((m) => ({ value: m.value, label: m.label }))
+  const dyn = dynModels ? dynModels.map((m) => ({ value: m.value, label: m.displayName, description: m.description })) : null
+  const modelList = ui.getModelOptions(slotsOf(runtime), dyn)
 
   return (
     <div className="inline-switcher" ref={wrapRef}>
@@ -70,27 +77,16 @@ export function RuntimeSwitcher({ sessionId }: { sessionId?: string } = {}) {
       >
         <span
           className="isw-icon"
-          style={{ background: AGENT_ICON_BG[runtime.agent] ?? 'var(--accent)' }}
+          style={{ background: AGENT_ICON_BG[runtime.engine] ?? 'var(--accent)' }}
         >
-          {/* 引擎内嵌小 SVG（和原型 renderSwitcher L62 一致） */}
-          {runtime.agent === 'claude' ? (
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M8 10l3.5 4L8 18" />
-              <path d="M14 18h4" />
-            </svg>
-          ) : (
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.2">
-              <circle cx="12" cy="12" r="7" />
-              <path d="M12 8v8M8 12h8" strokeLinecap="round" />
-            </svg>
-          )}
+          <EngIcon engine={runtime.engine} />
         </span>
         <span className="isw-text">
           <span className="isw-mode" id="chipMode">本地 CLI</span>
           <span className="isw-sep">·</span>
-          <span className="isw-primary" id="chipPrimary">{AGENT_LABEL[runtime.agent] ?? runtime.agent}</span>
+          <span className="isw-primary" id="chipPrimary">{AGENT_LABEL[runtime.engine] ?? runtime.engine}</span>
           <span className="isw-sep">·</span>
-          <span className="isw-model" id="chipModel">{modelLabel(runtime.agent, runtime.model, dynModels)}</span>
+          <span className="isw-model" id="chipModel">{ui.getModelLabel(runtime.model, dyn)}</span>
         </span>
         <span className="isw-chev">⌄</span>
       </button>
@@ -102,28 +98,20 @@ export function RuntimeSwitcher({ sessionId }: { sessionId?: string } = {}) {
           <div className="isw-row">
             <span className="isw-label">代理</span>
             <div className="isw-agent-grid">
-              <button
-                className={`isw-agent${runtime.agent === 'claude' ? ' is-active' : ''}`}
-                data-agent="claude"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  dispatch({ type: 'SET_AGENT', agent: 'claude' })
-                }}
-              >
-                <EngIcon engine="claude" />
-                <span className="ag-nm">Claude Code</span>
-              </button>
-              <button
-                className={`isw-agent${runtime.agent === 'codex' ? ' is-active' : ''}`}
-                data-agent="codex"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  dispatch({ type: 'SET_AGENT', agent: 'codex' })
-                }}
-              >
-                <EngIcon engine="codex" />
-                <span className="ag-nm">Codex CLI</span>
-              </button>
+              {AGENTS.map((a) => (
+                <button
+                  key={a.engine}
+                  className={`isw-agent${runtime.engine === a.engine ? ' is-active' : ''}`}
+                  data-agent={a.engine}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    dispatch({ type: 'SET_AGENT', agent: a.engine })
+                  }}
+                >
+                  <EngIcon engine={a.engine} />
+                  <span className="ag-nm">{a.name}</span>
+                </button>
+              ))}
             </div>
           </div>
 
@@ -150,7 +138,7 @@ export function RuntimeSwitcher({ sessionId }: { sessionId?: string } = {}) {
         <button className="isw-more" onClick={() => { setOpen(false); openSettings('exec') }}>
           <svg viewBox="0 0 24 24" width={14} height={14} fill="none" stroke="currentColor" strokeWidth={2} strokeLinejoin="round" strokeLinecap="round">
             <circle cx="12" cy="12" r="3" />
-            <path d="M19 13a1.6 1.6 0 0 0 .3 1.8 2 2 0 1 1-2.8 2.8 1.6 1.6 0 0 0-2.8 1V21a2 2 0 1 1-4 0 1.6 1.6 0 0 0-2.8-1 2 2 0 1 1-2.8-2.8A1.6 1.6 0 0 0 5 13a2 2 0 1 1 0-4 1.6 1.6 0 0 0 1.4-2.5A2 2 0 1 1 9.2 3.7 1.6 1.6 0 0 0 11 4a2 2 0 1 1 4 0 1.6 1.6 0 0 0 2.8-.3 2 2 0 1 1 2.8 2.8A1.6 1.6 0 0 0 21 9a2 2 0 1 1 0 4z" />
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
           </svg>
           {' '}打开执行设置
         </button>

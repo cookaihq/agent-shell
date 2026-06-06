@@ -14,6 +14,15 @@ vi.mock('../../api/client', () => ({ ApiError: class extends Error {}, api: {
     { name: 'codex', latestVersion: '0.137.0', updateUrl: 'https://github.com/openai/codex/releases' },
   ] }),
   testEngine: vi.fn().mockResolvedValue({ ok: true, version: '2.1.156' }),
+  // ProviderSection（ExecMode 内挂载）需要此方法
+  listProviders: vi.fn().mockResolvedValue({ engines: {
+    claude: { active: 'default', providers: [] },
+    codex: { active: 'default', providers: [] },
+  } }),
+  setActiveProvider: vi.fn().mockResolvedValue({ ok: true }),
+  // M2：每引擎默认模型持久化
+  getConfig: vi.fn().mockResolvedValue({ projectsDir: '', skillsDir: '', engineModels: { claude: 'sonnet' } }),
+  saveConfig: vi.fn().mockResolvedValue({}),
 } }))
 
 test('渲染 CLI 卡（版本/未检测）+ 测试 + 重新扫描', async () => {
@@ -24,6 +33,21 @@ test('渲染 CLI 卡（版本/未检测）+ 测试 + 重新扫描', async () => 
   await userEvent.click(screen.getByText('测试'))
   const { api } = await import('../../api/client') as any
   expect(api.testEngine).toHaveBeenCalledWith('claude')
+})
+
+test('模型 chip：持久化值 sonnet 高亮，点击 Opus 调用 saveConfig 并切换高亮', async () => {
+  const { api } = await import('../../api/client') as any
+  render(<ExecMode />)
+  // getConfig 返回 { claude: 'sonnet' }，等待异步加载完成
+  const sonnetChip = await screen.findByRole('button', { name: /Sonnet/ })
+  expect(sonnetChip.className).toContain('on')
+  // Default (recommended) chip 不高亮
+  const defaultChip = screen.getByRole('button', { name: /Default \(recommended\)/ })
+  expect(defaultChip.className).not.toContain('on')
+  // 点击 Opus chip → 调用 saveConfig + 切换高亮
+  const opusChip = screen.getByRole('button', { name: /^Opus\s*✓$/ })
+  await userEvent.click(opusChip)
+  expect(api.saveConfig).toHaveBeenCalledWith({ engineModels: { claude: 'opus' } })
 })
 
 test('已装版本落后时显示「有新版本」徽标，点击经 openExternal 打开官方 GitHub', async () => {

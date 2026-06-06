@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { appendRecord, readRecords, transcriptPath, transcriptToMessages } from '../transcript'
+import { appendRecord, readRecords, transcriptPath, collapseStreamingText } from '../transcript'
 
 let dir: string
 beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-tr-')) })
@@ -32,51 +32,62 @@ describe('transcript 模块', () => {
   })
 })
 
-it('重组：user_prompt→user DTO；assistant 流→assistant DTO（含 msg_id）', () => {
-  const recs = [
-    { ts: 1, engine: 'claude' as const, type: 'user_prompt', raw: { text: '你好', attachments: [] } },
-    { ts: 2, engine: 'claude' as const, type: 'assistant', raw: { type: 'assistant', message: { id: 'msg_9', content: [{ type: 'text', text: '你好呀' }] }, uuid: 'u9' } },
-    { ts: 3, engine: 'claude' as const, type: 'assistant_blocks', raw: { blocks: [{ type: 'text', text: '你好呀' }] } },
-    { ts: 4, engine: 'claude' as const, type: 'result', raw: { type: 'result', is_error: false, stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 } } },
-  ]
-  const msgs = transcriptToMessages('s1', recs)
-  expect(msgs).toHaveLength(2)
-  expect(msgs[0]).toMatchObject({ role: 'user', blocks: [{ type: 'text', text: '你好' }] })
-  expect(msgs[1]).toMatchObject({ role: 'assistant', sdkMessageId: 'msg_9', sdkUuid: 'u9' })
-  expect((msgs[1].blocks[0] as any)).toEqual({ type: 'text', text: '你好呀' })
-  expect(msgs[0].id).toBe('s1#0')
-  expect(msgs[1].id).toBe('s1#1')
-})
+// 注（§8）：transcript 记录 → MessageDTO 的重建测试已迁移到 renderer 切片
+// （apps/renderer/src/workspace/agents/__tests__/historyService.test.ts，claude/codex 切片各测）。
+// daemon 本文件仅保留 transcript 模块 IO（append/read）+ collapseStreamingText 纯函数行为守护。
 
-it('重组：跳过 provider 回吐的 typed-prompt user 记录（带 promptSource）', () => {
-  const recs = [
-    { ts: 1, engine: 'claude' as const, type: 'user_prompt', raw: { text: 'q', attachments: [] } },
-    { ts: 2, engine: 'claude' as const, type: 'user', raw: { type: 'user', promptSource: 'sdk', message: { role: 'user', content: [{ type: 'text', text: 'q' }] } } },
-    { ts: 3, engine: 'claude' as const, type: 'assistant', raw: { type: 'assistant', message: { id: 'm', content: [{ type: 'text', text: 'a' }] }, uuid: 'u' } },
-    { ts: 4, engine: 'claude' as const, type: 'assistant_blocks', raw: { blocks: [{ type: 'text', text: 'a' }] } },
-    { ts: 5, engine: 'claude' as const, type: 'result', raw: { type: 'result', is_error: false, stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 } } },
-  ]
-  const msgs = transcriptToMessages('s1', recs)
-  expect(msgs.map((m) => m.role)).toEqual(['user', 'assistant'])
-})
+describe('collapseStreamingText（折叠流式前缀堆叠文本块）', () => {
+  it('把同归属、前缀递增的相邻文本块折叠成最长那条', () => {
+    const blocks = [
+      { type: 'text', text: 'He' },
+      { type: 'text', text: 'Hello' },
+      { type: 'text', text: 'Hello' },
+    ]
+    expect(collapseStreamingText(blocks)).toEqual([{ type: 'text', text: 'Hello' }])
+  })
 
-it('重组：codex assistant_blocks → assistant DTO（直接用 blocks）', () => {
-  const recs = [
-    { ts: 1, engine: 'codex' as const, type: 'user_prompt', raw: { text: 'q', attachments: [] } },
-    { ts: 2, engine: 'codex' as const, type: 'assistant_blocks', raw: { blocks: [{ type: 'text', text: 'codex 答' }] } },
-  ]
-  const msgs = transcriptToMessages('s1', recs)
-  expect(msgs.map((m) => m.role)).toEqual(['user', 'assistant'])
-  expect(msgs[1].blocks).toEqual([{ type: 'text', text: 'codex 答' }])
-})
+  it('保留非前缀关系的相邻文本块（不误折）', () => {
+    const blocks = [
+      { type: 'text', text: '第一段独立内容' },
+      { type: 'text', text: '完全不同的第二段' },
+    ]
+    expect(collapseStreamingText(blocks)).toEqual(blocks)
+  })
 
-it('重组：assistant_blocks 含 thinking 块 → 历史保留思考（历史===实时）', () => {
-  const recs = [
-    { ts: 1, engine: 'claude' as const, type: 'user_prompt', raw: { text: 'q', attachments: [] } },
-    { ts: 2, engine: 'claude' as const, type: 'assistant', raw: { type: 'assistant', message: { id: 'm', content: [] }, uuid: 'u' } },
-    { ts: 3, engine: 'claude' as const, type: 'assistant_blocks', raw: { blocks: [{ type: 'thinking', text: '推理过程', elapsedMs: 1200 }, { type: 'text', text: '答案' }] } },
-  ]
-  const msgs = transcriptToMessages('s1', recs)
-  expect(msgs[1].blocks).toEqual([{ type: 'thinking', text: '推理过程', elapsedMs: 1200 }, { type: 'text', text: '答案' }])
-  expect(msgs[1].sdkMessageId).toBe('m')
+  it('不同 parentToolUseId 不折叠（即便前缀关系）', () => {
+    const blocks = [
+      { type: 'text', text: 'He', parentToolUseId: 'a' },
+      { type: 'text', text: 'Hello', parentToolUseId: 'b' },
+    ]
+    expect(collapseStreamingText(blocks)).toEqual(blocks)
+  })
+
+  it('被非文本块隔开的两段流式各自折叠、互不合并', () => {
+    const blocks = [
+      { type: 'text', text: 'Read' },
+      { type: 'text', text: 'Reading file' },
+      { type: 'tool_use', id: 't1', name: 'Read', input: {} },
+      { type: 'text', text: 'Done' },
+      { type: 'text', text: 'Done!' },
+    ]
+    expect(collapseStreamingText(blocks)).toEqual([
+      { type: 'text', text: 'Reading file' },
+      { type: 'tool_use', id: 't1', name: 'Read', input: {} },
+      { type: 'text', text: 'Done!' },
+    ])
+  })
+
+  it('已干净的块 = no-op（含 thinking/tool 不受影响）', () => {
+    const blocks = [{ type: 'thinking', text: 't' }, { type: 'text', text: 'a' }, { type: 'tool_use', id: 'x', name: 'Bash', input: {} }]
+    expect(collapseStreamingText(blocks)).toEqual(blocks)
+  })
+
+  it('折叠保留整个块对象的随行字段（parentToolUseId / skipTranscript 不裁剪）', () => {
+    const blocks = [
+      { type: 'text', text: 'I will', parentToolUseId: 'task-1' },
+      { type: 'text', text: 'I will start', parentToolUseId: 'task-1' },
+    ]
+    // 保留最长那条「整块」——含 parentToolUseId（§8/§11#5 子代理嵌套依赖此字段不丢）
+    expect(collapseStreamingText(blocks)).toEqual([{ type: 'text', text: 'I will start', parentToolUseId: 'task-1' }])
+  })
 })
