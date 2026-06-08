@@ -33,6 +33,15 @@ jobs:
           node-version: 24
           cache: pnpm
 
+      # 钉 Python 3.11 供 node-gyp 编译原生模块（better-sqlite3）。
+      # runner 镜像把默认 Python 升到 3.14，而 distutils 自 3.12 起从标准库移除；
+      # better-sqlite3 走的 node-gyp v9.4.1 仍 `from distutils.version import StrictVersion`
+      # → postinstall 报 ModuleNotFoundError: No module named 'distutils' → install 整步挂、release 发不出。
+      # 3.11 仍自带 distutils，setup-python 会把它前置到 PATH 让 node-gyp 取到。mac/win 两 job 都适用。
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       # Windows 上 better-sqlite3 无预编译二进制，node-gyp 从源码编译（runner 预装 VS Build Tools）。
       - run: pnpm install --frozen-lockfile
 
