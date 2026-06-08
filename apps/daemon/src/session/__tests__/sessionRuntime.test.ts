@@ -1191,3 +1191,58 @@ describe('claude 项目级命令（无会话入口 projectCommands）', () => {
     expect(probeCalls.length).toBe(1)
   })
 })
+
+// 切走会话页（前端卸载 → 退订）再切回（新订阅）时，「正在进行的这一轮」既没落库（assistant_blocks 仅 turn_end 写）
+// 又无 SSE 回放 → 在飞回合的助手内容丢失，只剩「处理中…」。根治：daemon 缓冲当前回合事件，新订阅者订阅即回放本轮已发生事件。
+describe('SessionRuntime 重连回放当前回合（在飞回合可恢复）', () => {
+  it('回合进行中：新订阅者订阅即收到本轮已发生事件的回放（无需任何先前订阅者）', async () => {
+    const { sess, rt, codex } = setup('codex')
+    rt.submit(sess.id, 'q1')                                 // 起一轮（无人订阅，模拟「人不在会话页」）
+    await flush()
+    const c = codex.current()
+    c.notify('turn/started', { turn: { id: 'turn-1', status: 'inProgress' } })
+    c.notify('item/completed', { item: { type: 'agentMessage', id: 'msg-1', text: '部分回答' } })
+    await flush()
+    // 回合仍在飞（未 turn/completed）→ 新订阅者订阅即回放 [turn_start, message]
+    const replay: AgentEvent[] = []
+    rt.subscribe(sess.id, (e) => replay.push(e))
+    expect(replay.map((e) => e.type)).toEqual(['turn_start', 'message'])
+  })
+
+  it('回放后继续收实时事件，且不重复回放过的事件', async () => {
+    const { sess, rt, codex } = setup('codex')
+    rt.submit(sess.id, 'q1')
+    await flush()
+    const c = codex.current()
+    c.notify('turn/started', { turn: { id: 'turn-1', status: 'inProgress' } })
+    c.notify('item/completed', { item: { type: 'agentMessage', id: 'msg-1', text: '部分回答' } })
+    await flush()
+    const got: AgentEvent[] = []
+    rt.subscribe(sess.id, (e) => got.push(e))               // 订阅即回放 [turn_start, message]
+    c.notify('thread/tokenUsage/updated', { tokenUsage: { total: { inputTokens: 5, outputTokens: 7 } } })
+    await flush()
+    // 回放两条 + 之后实时一条 usage；turn_start/message 不被二次推送
+    expect(got.map((e) => e.type)).toEqual(['turn_start', 'message', 'usage'])
+  })
+
+  it('回合结束后：缓冲清空，新订阅者无回放（避免与已落库的 assistant_blocks 重复）', async () => {
+    const { sess, rt, codex } = setup('codex')
+    rt.submit(sess.id, 'q1')
+    await flush()
+    const c = codex.current()
+    c.notify('turn/started', { turn: { id: 'turn-1', status: 'inProgress' } })
+    c.notify('item/completed', { item: { type: 'agentMessage', id: 'msg-1', text: '回答' } })
+    c.notify('turn/completed', { turn: { id: 'turn-1', status: 'completed' } })
+    await flush()
+    const after: AgentEvent[] = []
+    rt.subscribe(sess.id, (e) => after.push(e))             // 回合已结束 → 内容在 transcript → 不应回放
+    expect(after).toEqual([])
+  })
+
+  it('空闲会话（从未起轮）：新订阅者无回放', () => {
+    const { sess, rt } = setup('codex')
+    const ev: AgentEvent[] = []
+    rt.subscribe(sess.id, (e) => ev.push(e))
+    expect(ev).toEqual([])
+  })
+})

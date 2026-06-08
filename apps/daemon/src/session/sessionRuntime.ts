@@ -149,6 +149,9 @@ interface SessionState {
   grantedDirs: string[]
   subscribers: Set<(ev: AgentEvent) => void>
   blocks: unknown[]                         // 本 turn 累积的 assistant 内容块
+  /** 本 turn 已广播给订阅者的事件缓冲（重连回放用）：turn_start 重置（含 turn_start 本身）、每次广播追加、turn_end 清空。
+   *  使「切走会话页（前端卸载→退订）再切回（新订阅）」能恢复在飞回合——它既未落库（assistant_blocks 仅 turn_end 写）又无 SSE 回放。 */
+  turnEvents: AgentEvent[]
   /** 本 turn 的失败真因（turn_end.detail：引擎 stderr / result 报错）。onEvent 暂存、onTurnEnd 落进 run_note 块后清。
    *  turn_end 事件先于 onTurnEnd 触发（runtime 固定顺序），故这里能稳拿到，不依赖改 onTurnEnd 回调签名。 */
   failDetail?: string
@@ -186,7 +189,7 @@ export class SessionRuntime {
       // codex 重水合：从持久化会话行 seed run.sandbox/.approval（DB 列 codex_sandbox/codex_approval → SessionRow.sandbox/.approval），
       // 让重开会话后不带 runtime 的 submit 仍沿用上次两轴档（Part A P3）；null → 留 undefined 走引擎默认。
       run: sess.engine === 'claude' ? { kind: 'claude', queryAlive: false, permissionMode: 'default' } : { kind: 'codex', serverAlive: false, sandbox: sess.sandbox ?? undefined, approval: sess.approval ?? undefined },   // agent-literal-ok
-      grantedDirs: [], subscribers: new Set(), blocks: [], skipToolUses: new Set(),
+      grantedDirs: [], subscribers: new Set(), blocks: [], turnEvents: [], skipToolUses: new Set(),
     }
     this.states.set(sessionId, st)
     return st
@@ -198,6 +201,9 @@ export class SessionRuntime {
 
   subscribe(sessionId: string, fn: (ev: AgentEvent) => void): () => void {
     const st = this.load(sessionId)
+    // 在飞回合回放：订阅即把本轮已广播事件按序补发给新订阅者（先回放、再加入实时集；单线程内二者之间无事件插队 → 不重不漏）。
+    // 空闲 / 回合已结束时 turnEvents 为空 → 无回放（已结束回合内容在 transcript，避免与 assistant_blocks 重复渲染）。
+    for (const ev of st.turnEvents) fn(ev)
     st.subscribers.add(fn)
     return () => st.subscribers.delete(fn)
   }
@@ -570,6 +576,10 @@ export class SessionRuntime {
   private onEvent(st: SessionState, raw: AgentEvent): void {
     if (st.disposed) return   // 会话已删除：丢弃迟到事件，不推送、不累积
     const ev = truncateEvent(raw, this.deps.truncateLimit ?? TRUNCATE_LIMIT)
+    // 当前回合事件缓冲（重连回放用，与 st.blocks 同生命周期）：turn_start 重置为新轮起点（含 turn_start 本身），其余追加。
+    // turn_end 由 onTurnEnd 清空（内容已落 assistant_blocks）。这是订阅广播的唯一出口，故缓冲与订阅者所见严格一致。
+    if (ev.type === 'turn_start') st.turnEvents = [ev]
+    else st.turnEvents.push(ev)
     for (const fn of st.subscribers) fn(ev)
     switch (ev.type) {
       // 落库 block 用 type:'text'（与 user 文本块、M5 messages 约定、MVP spec 一致；内部事件类型是 message，但块语义=纯文本）
@@ -634,6 +644,7 @@ export class SessionRuntime {
       appendRecord(this.deps.transcriptDir ?? sessionsDir(), sessionId, st.engine, 'assistant_blocks', { blocks: collapseStreamingText(st.blocks) })
     }
     st.blocks = []
+    st.turnEvents = []        // 回合结束：清空在飞回合事件缓冲（内容已落 assistant_blocks）→ 此后新订阅者不再回放本轮，防与历史重复
     st.skipToolUses.clear()   // skip 标记随块落库后清空（与本 turn 块同生命周期）
     st.usage = undefined
     // 持久句柄（turnBoundary='event'：claude SDK query / codex app-server）：本轮结束后**保活**（不 endInput）→ 让续投/中断/

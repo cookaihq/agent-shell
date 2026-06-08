@@ -6,7 +6,7 @@
  *
  * ⚠️ 规则：每次任务完成必须把 BUILD_NUMBER +1。详见 agent-shell/CLAUDE.md §版本号。
  */
-export const BUILD_NUMBER = 130
+export const BUILD_NUMBER = 131
 
 /** 展示用版本串：固定基底 v0.0.1 + 递增构建号，如 v0.0.1.1。 */
 export const APP_VERSION = `v0.0.1.${BUILD_NUMBER}`
