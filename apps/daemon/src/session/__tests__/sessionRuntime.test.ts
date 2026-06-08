@@ -8,6 +8,7 @@ import { getUsage } from '../../db/usage'
 import { readRecords } from '../transcript'
 import { SessionRuntime } from '../sessionRuntime'
 import type { RunState } from '../sessionRuntime'
+import { fakeCodexClient } from '../../runtimes/codex/__tests__/fakeCodexClient'
 import type { AgentEvent } from '@agent-shell/contracts'
 
 function fakeChild() {
@@ -26,11 +27,11 @@ const flush = async (n = 4) => { for (let i = 0; i < n; i++) await new Promise((
 function fakeClaudeQuery() {
   const instances: any[] = []
   const queryFn = (args: any) => {
-    const inst: any = { options: args.options, received: [] as string[], contents: [] as any[], emitQ: [] as any[], waiting: null as any, inputEnded: false, genDone: false, interrupts: 0, setPermissionMode: [] as string[], applyFlagSettings: [] as any[], setModel: [] as string[] }
+    const inst: any = { options: args.options, received: [] as string[], contents: [] as any[], uuids: [] as (string | undefined)[], emitQ: [] as any[], waiting: null as any, inputEnded: false, genDone: false, interrupts: 0, setPermissionMode: [] as string[], applyFlagSettings: [] as any[], setModel: [] as string[] }
     instances.push(inst)
     const maybeComplete = () => { if (inst.inputEnded && inst.emitQ.length === 0 && inst.waiting) { const w = inst.waiting; inst.waiting = null; inst.genDone = true; w({ done: true, value: undefined }) } }
     inst.maybeComplete = maybeComplete
-    ;(async () => { for await (const m of args.prompt) { const content = m?.message?.content; inst.contents.push(content); const t = Array.isArray(content) ? content.find((b: any) => b?.type === 'text')?.text : undefined; if (typeof t === 'string') inst.received.push(t) } inst.inputEnded = true; maybeComplete() })()
+    ;(async () => { for await (const m of args.prompt) { const content = m?.message?.content; inst.contents.push(content); inst.uuids.push(m?.uuid); const t = Array.isArray(content) ? content.find((b: any) => b?.type === 'text')?.text : undefined; if (typeof t === 'string') inst.received.push(t) } inst.inputEnded = true; maybeComplete() })()
     const iterator = {
       next: () => {
         if (inst.emitQ.length) return Promise.resolve({ done: false, value: inst.emitQ.shift() })
@@ -65,48 +66,56 @@ function setup(
   const children: any[] = []
   const spawnFn = (() => { const cp = fakeChild(); children.push(cp); return cp }) as any
   const claude = fakeClaudeQuery()
+  const codex = fakeCodexClient()
   // 假命令探针：记录每次调用的 cwd/addDirs（验证去重/指纹），默认返回 PROBE_CMDS（与 live 缓存区分）
   const probeCalls: Array<{ cwd: string; addDirs?: string[] }> = []
   const probeCommandsFn = opts.probeCommandsFn ?? (async (o: { cwd: string; addDirs?: string[] }) => { probeCalls.push(o); return opts.probeResult ?? PROBE_CMDS })
-  const rt = new SessionRuntime({ db, resolveBin: () => '/abs/bin', spawnFn, claudeQueryFn: claude.queryFn as any, probeCommandsFn, transcriptDir: opts.transcriptDir })
-  return { db, proj, sess, rt, children, claude, probeCalls }
+  const rt = new SessionRuntime({ db, resolveBin: () => '/abs/bin', spawnFn, claudeQueryFn: claude.queryFn as any, codexClientFactory: codex.factory, probeCommandsFn, transcriptDir: opts.transcriptDir })
+  return { db, proj, sess, rt, children, claude, codex, probeCalls }
 }
 
 describe('RunState 判别式联合：非法态不可表达（类型级守卫）', () => {
   it('codex 运行态访问 claude 专属档位 → 编译期报错（@ts-expect-error 守住）', () => {
-    const codexRun: Extract<RunState, { kind: 'codex' }> = { kind: 'codex' }
+    const codexRun: Extract<RunState, { kind: 'codex' }> = { kind: 'codex', serverAlive: false }
     // @ts-expect-error codex 运行态无 permissionMode（claude 专属，不可表达）
     void codexRun.permissionMode
-    // @ts-expect-error codex 运行态无 queryAlive（claude 专属，不可表达）
+    // @ts-expect-error codex 运行态无 queryAlive（codex 用 serverAlive，无 queryAlive）
     void codexRun.queryAlive
-    // @ts-expect-error codex 运行态无 effort（claude 专属，不可表达）
-    void codexRun.effort
+    // @ts-expect-error codex 运行态无 outputFormat（claude 结构化输出专属，不可表达）
+    void codexRun.outputFormat
+    // codex 自有档位（sandbox/approval/effort/serverAlive/idleTimer）：可访问，不报错
+    void codexRun.sandbox; void codexRun.approval; void codexRun.effort; void codexRun.serverAlive
     expect(codexRun.kind).toBe('codex')
   })
 })
 
 describe('SessionRuntime 单轮闭环', () => {
-  it('codex submit：起进程→事件 fan-out→turn_end 落库（assistant message + usage + status completed + turn=1）', async () => {
-    const { db, sess, rt, children } = setup('codex')
+  it('codex submit：起 app-server→事件 fan-out→turn_end 落库（assistant message + usage + status completed + turn=1）', async () => {
+    const { db, sess, rt, codex } = setup('codex')
     const seen: AgentEvent[] = []
     rt.subscribe(sess.id, (e) => seen.push(e))
     rt.submit(sess.id, '你好')
+    await flush()   // 等 boot 链（initialize→thread/start→turn/start）跑完
 
-    const cp = children[0]
-    // codex 一轮：thread.started(带 id) → agent_message → turn.completed
-    cp.stdout.emit('data', JSON.stringify({ type: 'thread.started', thread_id: 'th-1' }) + '\n')
-    cp.stdout.emit('data', JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: '回答' } }) + '\n')
-    cp.stdout.emit('data', JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 5, output_tokens: 7 } }) + '\n')
-    cp.emit('close', 0, null)
-    await new Promise((r) => setImmediate(r))   // 等 done 微任务跑完
+    const c = codex.current()
+    // boot 序列：initialize → thread/start → turn/start
+    expect(c.requests.map((r: any) => r.method)).toEqual(['initialize', 'thread/start', 'turn/start'])
+    // codex 一轮（JSON-RPC 通知）：turn/started → agentMessage 定格 → tokenUsage → turn/completed(completed)
+    c.notify('turn/started', { turn: { id: 'turn-1', status: 'inProgress' } })
+    c.notify('item/completed', { item: { type: 'agentMessage', id: 'msg-1', text: '回答' } })
+    c.notify('thread/tokenUsage/updated', { tokenUsage: { total: { inputTokens: 5, outputTokens: 7 } } })
+    c.notify('turn/completed', { turn: { id: 'turn-1', status: 'completed' } })
+    await flush()
 
     // 订阅者收到 turn_start（running 入口）→ message/usage/turn_end
     expect(seen.map((e) => e.type)).toEqual(['turn_start', 'message', 'usage', 'turn_end'])
     // usage turn=1
     expect(getUsage(db, sess.id)).toMatchObject([{ turn: 1, inputTokens: 5, outputTokens: 7 }])
-    // status completed + resumable_id 落库
+    // status completed + resumable_id（= codex thread_id）落库
     expect(getSession(db, sess.id)).toMatchObject({ status: 'completed', resumableId: 'th-1' })
+    // 常驻保活：turn 结束后 app-server 不退（client 未 close），running 归 false
     expect(rt.isRunning(sess.id)).toBe(false)
+    expect(c.closes).toEqual([])   // 没 close，保活
   })
 
   it('codex submit：user 消息在 submit 时立即写入 transcript', () => {
@@ -119,13 +128,22 @@ describe('SessionRuntime 单轮闭环', () => {
     } finally { fs.rmSync(dir, { recursive: true, force: true }) }
   })
 
-  it('失败 turn（turn.failed）→ status failed，不 recordUsage', async () => {
-    const { db, sess, rt, children } = setup('codex')
+  it('claude：activeFile → 推给 SDK 的 prompt 末尾带 <current_file> 块', async () => {
+    const { rt, sess, claude } = setup('claude')
+    rt.submit(sess.id, '帮我看下', [], undefined, 'src/foo.ts')
+    await flush()
+    const received = claude.current().received.join('\n')
+    expect(received).toContain('<current_file>src/foo.ts</current_file>')
+  })
+
+  it('失败 turn（turn/completed status=failed）→ status failed，不 recordUsage', async () => {
+    const { db, sess, rt, codex } = setup('codex')
     rt.submit(sess.id, 'x')
-    const cp = children[0]
-    cp.stdout.emit('data', JSON.stringify({ type: 'turn.failed', error: { message: 'upstream 503' } }) + '\n')
-    cp.emit('close', 1, null)
-    await new Promise((r) => setImmediate(r))
+    await flush()
+    const c = codex.current()
+    c.notify('turn/started', { turn: { id: 'turn-1', status: 'inProgress' } })
+    c.notify('turn/completed', { turn: { id: 'turn-1', status: 'failed', error: { message: 'upstream 503' } } })
+    await flush()
     expect(getSession(db, sess.id)).toMatchObject({ status: 'failed' })
     expect(getUsage(db, sess.id)).toEqual([])
   })
@@ -150,6 +168,53 @@ describe('SessionRuntime 单轮闭环', () => {
       expect(texts).toHaveLength(1)
       expect(texts[0].text).toBe('I will start now')
     } finally { fs.rmSync(trDir, { recursive: true, force: true }) }
+  })
+
+  it('claude：user_prompt transcript 记录带 checkpointId，且 = 该 prompt 在 SDKUserMessage 上的 uuid（逐条 rewind 前置）', async () => {
+    const trDir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-rt-'))
+    try {
+      const { sess, rt, claude } = setup('claude', { transcriptDir: trDir })
+      rt.submit(sess.id, 'q1')
+      await flush()
+      const rec = readRecords(trDir, sess.id).find((r) => r.type === 'user_prompt')
+      const ckpt = (rec?.raw as any).checkpointId
+      expect(typeof ckpt).toBe('string')
+      expect(ckpt).toBeTruthy()
+      // 单一来源：transcript 记录的 checkpointId 与 SDK 收到的 user 消息 uuid 同值（rewindFiles 据此回退到该条前状态）
+      expect(claude.current().uuids[0]).toBe(ckpt)
+    } finally { fs.rmSync(trDir, { recursive: true, force: true }) }
+  })
+
+  it('claude 续投：第二条 user_prompt 记录带各自 checkpointId（每条独立，逐条可回退）', async () => {
+    const trDir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-rt-'))
+    try {
+      const { sess, rt, claude } = setup('claude', { transcriptDir: trDir })
+      rt.submit(sess.id, 'q1')
+      await flush()
+      claude.emit({ type: 'result', stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 } })
+      await flush()                        // q1 完成、query 保活
+      rt.submit(sess.id, 'q2')             // 空闲续投同一 query
+      await flush()
+      const recs = readRecords(trDir, sess.id).filter((r) => r.type === 'user_prompt')
+      expect(recs).toHaveLength(2)
+      const ck1 = (recs[0].raw as any).checkpointId
+      const ck2 = (recs[1].raw as any).checkpointId
+      expect(ck1).toBeTruthy(); expect(ck2).toBeTruthy()
+      expect(ck1).not.toBe(ck2)            // 两条各有独立检查点
+      // 与 SDK 收到的两条 user 消息 uuid 一一对应
+      expect(claude.current().uuids).toEqual([ck1, ck2])
+    } finally { fs.rmSync(trDir, { recursive: true, force: true }) }
+  })
+
+  it('codex：user_prompt 记录不带 checkpointId（无文件检查点能力）', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-rt-'))
+    try {
+      const { sess, rt } = setup('codex', { transcriptDir: dir })
+      rt.submit(sess.id, 'x')
+      const rec = readRecords(dir, sess.id)[0]
+      expect(rec).toMatchObject({ type: 'user_prompt', raw: { text: 'x' } })
+      expect((rec.raw as any).checkpointId).toBeUndefined()
+    } finally { fs.rmSync(dir, { recursive: true, force: true }) }
   })
 })
 
@@ -239,17 +304,41 @@ describe('SessionRuntime 续投队列', () => {
     expect(rt.isRunning(sess.id)).toBe(false)
   })
 
-  it('codex 续投：turn 完成进程退出后，队列有则起新进程', async () => {
-    const { sess, rt, children } = setup('codex')
+  it('codex 运行中续投：turn 进行时 submit→入队；turn/completed 后 pushUser 同一 app-server、不新起进程（常驻保活）', async () => {
+    const { sess, rt, codex } = setup('codex')
     rt.submit(sess.id, 'q1')
-    const cp1 = children[0]
-    rt.submit(sess.id, 'q2')                         // 入队
-    cp1.stdout.emit('data', JSON.stringify({ type: 'thread.started', thread_id: 'th-9' }) + '\n')
-    cp1.stdout.emit('data', JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }) + '\n')
-    cp1.emit('close', 0, null)
-    await new Promise((r) => setImmediate(r))
-    // 起了第二个进程
-    expect(children.length).toBe(2)
+    await flush()
+    const c = codex.current()
+    c.notify('turn/started', { turn: { id: 'turn-1', status: 'inProgress' } })
+    rt.submit(sess.id, 'q2')                         // 运行中 → 入队
+    expect(codex.instances.length).toBe(1)           // 没起新 client
+    c.notify('turn/completed', { turn: { id: 'turn-1', status: 'completed' } })
+    await flush()
+    // 队列有 q2 → pushUser 同一 client（不新起进程），client 仍是同一个
+    expect(codex.instances.length).toBe(1)
+    // 第二个 turn/start 发到同一 client（q2 文本）
+    const turnStarts = c.requests.filter((r: any) => r.method === 'turn/start')
+    expect(turnStarts).toHaveLength(2)
+    expect((turnStarts[1].params as any).input[0].text).toBe('q2')
+    expect(rt.isRunning(sess.id)).toBe(true)
+    expect(c.closes).toEqual([])                     // 保活，未 close
+  })
+
+  it('codex 空闲续投：q1 完成后保活（running false 但 server 不退）→ 空闲 submit q2 复用同 client pushUser（不重 spawn）', async () => {
+    const { sess, rt, codex } = setup('codex')
+    rt.submit(sess.id, 'q1')
+    await flush()
+    const c = codex.current()
+    c.notify('turn/started', { turn: { id: 'turn-1', status: 'inProgress' } })
+    c.notify('turn/completed', { turn: { id: 'turn-1', status: 'completed' } })
+    await flush()                                    // q1 完成 → 保活、running false
+    expect(rt.isRunning(sess.id)).toBe(false)
+    expect(codex.instances.length).toBe(1)
+    rt.submit(sess.id, 'q2')                         // 空闲态续投 → 复用同 client pushUser
+    await flush()
+    expect(codex.instances.length).toBe(1)           // 没起新 client
+    const turnStarts = c.requests.filter((r) => r.method === 'turn/start')
+    expect((turnStarts.at(-1)!.params as any).input[0].text).toBe('q2')
     expect(rt.isRunning(sess.id)).toBe(true)
   })
 
@@ -281,21 +370,24 @@ describe('SessionRuntime 消息附件（contextFiles）', () => {
     const children: any[] = []
     const spawnFn = ((bin: string, args: string[]) => { const cp = fakeChild(); cp.spawnArgs = args; children.push(cp); return cp }) as any
     const claude = fakeClaudeQuery()
-    const rt = new SessionRuntime({ db, resolveBin: () => '/abs/bin', spawnFn, claudeQueryFn: claude.queryFn as any, transcriptDir })
-    return { db, work, sess, rt, children, claude }
+    const codex = fakeCodexClient()
+    const rt = new SessionRuntime({ db, resolveBin: () => '/abs/bin', spawnFn, claudeQueryFn: claude.queryFn as any, codexClientFactory: codex.factory, transcriptDir })
+    return { db, work, sess, rt, children, claude, codex }
   }
 
-  it('项目内附件：transcript 写 user_prompt（含 attachments）；引擎 prompt 带 preamble', () => {
+  it('项目内附件：transcript 写 user_prompt（含 attachments）；引擎 prompt 带 preamble', async () => {
     const transcriptDir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-rt-')); dirs.push(transcriptDir)
-    const { work, sess, rt, children } = realProject('codex', transcriptDir)
+    const { work, sess, rt, codex } = realProject('codex', transcriptDir)
     fs.mkdirSync(path.join(work, 'attachments')); fs.writeFileSync(path.join(work, 'attachments', 'a.png'), 'x')
     rt.submit(sess.id, '看下这张图', ['attachments/a.png'])
+    await flush()
     // transcript 里有 user_prompt，raw 包含原文 + attachments
     const rec = readRecords(transcriptDir, sess.id)[0]
     expect(rec).toMatchObject({ type: 'user_prompt', raw: { text: '看下这张图' } })
     expect((rec.raw as any).attachments).toContainEqual({ name: 'a.png', path: 'attachments/a.png' })
-    // 引擎 prompt（codex 原样文本）带 preamble
-    expect(children[0].stdinWrites[0]).toBe('看下这张图\n\nAttached project files: `attachments/a.png`')
+    // 引擎 prompt（codex 原样文本）带 preamble → 经 turn/start.input[0].text 透传
+    const turnStart = codex.current().requests.find((r) => r.method === 'turn/start')!
+    expect((turnStart.params as any).input[0].text).toBe('看下这张图\n\nAttached project files: `attachments/a.png`')
   })
 
   it('项目外附件：claude SDK options.additionalDirectories 含该文件所在目录', () => {
@@ -306,13 +398,15 @@ describe('SessionRuntime 消息附件（contextFiles）', () => {
     expect(claude.current().options.additionalDirectories).toContain(ext)
   })
 
-  it('无 contextFiles：transcript 写 user_prompt（无附件），prompt 不带 preamble（回归）', () => {
+  it('无 contextFiles：transcript 写 user_prompt（无附件），prompt 不带 preamble（回归）', async () => {
     const transcriptDir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-rt-')); dirs.push(transcriptDir)
-    const { sess, rt, children } = realProject('codex', transcriptDir)
+    const { sess, rt, codex } = realProject('codex', transcriptDir)
     rt.submit(sess.id, '纯文本')
+    await flush()
     // transcript 记录 user_prompt，attachments 为空数组
     expect(readRecords(transcriptDir, sess.id)[0]).toMatchObject({ type: 'user_prompt', raw: { text: '纯文本', attachments: [] } })
-    expect(children[0].stdinWrites[0]).toBe('纯文本')
+    const turnStart = codex.current().requests.find((r) => r.method === 'turn/start')!
+    expect((turnStart.params as any).input[0].text).toBe('纯文本')
   })
 
   it('claude 运行中排队消息引用新外部目录 → 不 pushUser 到当前 query，排空后新 query 带累积 additionalDirectories', async () => {
@@ -348,8 +442,9 @@ describe('SessionRuntime 图片内联（仅 claude）', () => {
     const children: any[] = []
     const spawnFn = ((bin: string, args: string[]) => { const cp = fakeChild(); cp.spawnArgs = args; children.push(cp); return cp }) as any
     const claude = fakeClaudeQuery()
-    const rt = new SessionRuntime({ db, resolveBin: () => '/abs/bin', spawnFn, claudeQueryFn: claude.queryFn as any, transcriptDir })
-    return { db, work, sess, rt, children, claude }
+    const codex = fakeCodexClient()
+    const rt = new SessionRuntime({ db, resolveBin: () => '/abs/bin', spawnFn, claudeQueryFn: claude.queryFn as any, codexClientFactory: codex.factory, transcriptDir })
+    return { db, work, sess, rt, children, claude, codex }
   }
   function writePng(work: string, rel = 'attachments/a.png'): void {
     const abs = path.join(work, rel); fs.mkdirSync(path.dirname(abs), { recursive: true }); fs.writeFileSync(abs, Buffer.alloc(10, 1))
@@ -379,11 +474,14 @@ describe('SessionRuntime 图片内联（仅 claude）', () => {
     expect(text).not.toContain('a.png')                                     // 图片不在 preamble
   })
 
-  it('codex：图片不内联，路径仍走 preamble（无 image 块，回归）', () => {
-    const { work, sess, rt, children } = realProject('codex')
+  it('codex：图片不内联，路径仍走 preamble（无 image 块，回归）', async () => {
+    const { work, sess, rt, codex } = realProject('codex')
     writePng(work)
     rt.submit(sess.id, '看下这张图', ['attachments/a.png'])
-    expect(children[0].stdinWrites[0]).toBe('看下这张图\n\nAttached project files: `attachments/a.png`')
+    await flush()
+    // codex 无图片内联：图片路径仍走 preamble，整段文本经 turn/start.input[0].text 透传（无 image 块）
+    const turnStart = codex.current().requests.find((r) => r.method === 'turn/start')!
+    expect((turnStart.params as any).input[0].text).toBe('看下这张图\n\nAttached project files: `attachments/a.png`')
   })
 
   it('claude 空闲续投：第二轮带图 → 复用同 query pushUser 带 image 块', async () => {
@@ -499,20 +597,154 @@ describe('SessionRuntime 子代理归属落库（parentToolUseId 持久化，F1�
   })
 })
 
+describe('SessionRuntime codex 子代理状态持久化（codex_subagent 落 assistant_blocks，P5c）', () => {
+  it('codex：codex_subagent 事件（spawned/item/status/report/wait）作块随 assistant_blocks 落库 → 重载可 replay', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-rt-'))
+    try {
+      const { sess, rt, codex } = setup('codex', { transcriptDir: dir })
+      rt.subscribe(sess.id, () => {})
+      rt.submit(sess.id, 'q1')
+      await flush()
+      const c = codex.current()
+      c.notify('turn/started', { turn: { id: 'turn-1', status: 'inProgress' } })
+      // 主代理 spawnAgent 编排 item（completed）→ 揭示子线程 sub-a + emit spawned + 主线锚点 tool_use(spawnAgent)
+      c.notify('item/completed', {
+        item: {
+          type: 'collabAgentToolCall', tool: 'spawnAgent', senderThreadId: 'th-1',
+          receiverThreadIds: ['sub-a'], prompt: '角色：writer-A\n写文件', agentsStates: { 'sub-a': { status: 'running' } },
+        },
+      })
+      // 子线程 item（已知子 thread → 走子路由 → codex_subagent{phase:item}）
+      c.notify('item/completed', { threadId: 'sub-a', item: { type: 'agentMessage', id: 'm1', text: '已写 AAA.txt' } })
+      // wait 完成 → report + waiting:false
+      c.notify('item/completed', {
+        item: { type: 'collabAgentToolCall', tool: 'wait', senderThreadId: 'th-1', agentsStates: { 'sub-a': { status: 'completed', message: '完成：AAA.txt' } } },
+      })
+      c.notify('turn/completed', { turn: { id: 'turn-1', status: 'completed' } })
+      await flush()
+
+      const rec = readRecords(dir, sess.id).find((r) => r.type === 'assistant_blocks')!
+      const blocks = (rec.raw as { blocks: Array<Record<string, any>> }).blocks
+      const subBlocks = blocks.filter((b) => b.type === 'codex_subagent')
+      // 锚点 tool_use(spawnAgent) 随共享事件落库（renderer timelineMount 挂载点）
+      expect(blocks.find((b) => b.type === 'tool_use' && b.name === 'spawnAgent')).toBeTruthy()
+      // 子代理生命周期事件作块落库（spawned/item/status/report/wait），保留 threadId 归属 + phase
+      expect(subBlocks.some((b) => b.phase === 'spawned' && b.threadId === 'sub-a' && b.parentThreadId === 'th-1')).toBe(true)
+      expect(subBlocks.some((b) => b.phase === 'item' && b.threadId === 'sub-a' && b.item?.text === '已写 AAA.txt')).toBe(true)
+      expect(subBlocks.some((b) => b.phase === 'report' && b.threadId === 'sub-a' && b.report === '完成：AAA.txt')).toBe(true)
+      expect(subBlocks.some((b) => b.phase === 'status' && b.threadId === 'sub-a')).toBe(true)
+    } finally { fs.rmSync(dir, { recursive: true, force: true }) }
+  })
+
+  it('codex：子消息流式增量帧不落库，只落定格帧（消除 transcript 膨胀）+ 非 message 帧全留', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-rt-'))
+    try {
+      const { sess, rt, codex } = setup('codex', { transcriptDir: dir })
+      const seen: AgentEvent[] = []
+      rt.subscribe(sess.id, (e) => seen.push(e))
+      rt.submit(sess.id, 'q1')
+      await flush()
+      const c = codex.current()
+      c.notify('turn/started', { turn: { id: 'turn-1', status: 'inProgress' } })
+      // 揭示子线程 sub-a（spawnAgent 编排）
+      c.notify('item/completed', {
+        item: {
+          type: 'collabAgentToolCall', tool: 'spawnAgent', senderThreadId: 'th-1',
+          receiverThreadIds: ['sub-a'], prompt: '角色：A\n写文件', agentsStates: { 'sub-a': { status: 'running' } },
+        },
+      })
+      // 子线程一条消息流式 3 段增量（codexAppServer 按 itemId 累计 → 3 个 streaming:true 帧）→ item/completed 定格全文
+      c.notify('item/agentMessage/delta', { threadId: 'sub-a', itemId: 'm1', delta: '部' })
+      c.notify('item/agentMessage/delta', { threadId: 'sub-a', itemId: 'm1', delta: '分内' })
+      c.notify('item/agentMessage/delta', { threadId: 'sub-a', itemId: 'm1', delta: '容已写' })
+      c.notify('item/completed', { threadId: 'sub-a', item: { type: 'agentMessage', id: 'm1', text: '部分内容已写' } })
+      // 子线程 tool_use（非 message 帧，须保留）
+      c.notify('item/started', { threadId: 'sub-a', item: { type: 'commandExecution', id: 't1', command: 'ls' } })
+      c.notify('turn/completed', { turn: { id: 'turn-1', status: 'completed' } })
+      await flush()
+
+      // live SSE 通路：流式帧照常推送（用户看到逐字增量）—— 共发 3 个 streaming:true message 帧
+      const liveStreamMsgs = seen.filter(
+        (e) => e.type === 'codex_subagent' && e.phase === 'item' && e.item?.kind === 'message' && e.item.streaming === true,
+      )
+      expect(liveStreamMsgs.length).toBe(3)
+
+      // 落库：流式 message 帧全被丢，子线程只剩 1 个 message 块 = 定格全文（streaming 缺省）
+      const rec = readRecords(dir, sess.id).find((r) => r.type === 'assistant_blocks')!
+      const blocks = (rec.raw as { blocks: Array<Record<string, any>> }).blocks
+      const subMsgBlocks = blocks.filter(
+        (b) => b.type === 'codex_subagent' && b.phase === 'item' && b.item?.kind === 'message',
+      )
+      expect(subMsgBlocks).toHaveLength(1)
+      expect(subMsgBlocks[0].item.text).toBe('部分内容已写')
+      expect(subMsgBlocks[0].item.streaming).toBeUndefined()
+      // 无任何流式帧落库
+      expect(blocks.some((b) => b.type === 'codex_subagent' && b.item?.streaming === true)).toBe(false)
+      // 非 message 帧（spawned / tool_use）照常保留
+      expect(blocks.some((b) => b.type === 'codex_subagent' && b.phase === 'spawned' && b.threadId === 'sub-a')).toBe(true)
+      expect(blocks.some((b) => b.type === 'codex_subagent' && b.phase === 'item' && b.item?.kind === 'tool_use' && b.item?.id === 't1')).toBe(true)
+    } finally { fs.rmSync(dir, { recursive: true, force: true }) }
+  })
+
+  it('claude：永不发 codex_subagent → assistant_blocks 不含任何 codex_subagent 块（不受本改动影响）', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-rt-'))
+    try {
+      const { sess, rt, claude } = setup('claude', { transcriptDir: dir })
+      rt.subscribe(sess.id, () => {})
+      rt.submit(sess.id, 'q1')
+      await flush()
+      claude.emit({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'tu1', name: 'Read', input: { file_path: 'a' } }] } })
+      claude.emit({ type: 'result', stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 } })
+      await flush()
+      const rec = readRecords(dir, sess.id).find((r) => r.type === 'assistant_blocks')!
+      const blocks = (rec.raw as { blocks: Array<Record<string, any>> }).blocks
+      expect(blocks.some((b) => b.type === 'codex_subagent')).toBe(false)
+      expect(blocks.find((b) => b.id === 'tu1')).toBeTruthy()
+    } finally { fs.rmSync(dir, { recursive: true, force: true }) }
+  })
+})
+
 describe('SessionRuntime interrupt', () => {
-  it('interrupt：对活进程发 SIGTERM、清空队列、合成 turn_end(aborted) 落 status=aborted', async () => {
-    const { db, sess, rt, children } = setup('codex')
+  it('codex interrupt：发 turn/interrupt + 关 client、清空队列、合成 turn_end(aborted) 落 status=aborted', async () => {
+    const { db, sess, rt, codex } = setup('codex')
     rt.submit(sess.id, 'q1')
+    await flush()
+    const c = codex.current()
+    c.notify('turn/started', { turn: { id: 'turn-1', status: 'inProgress' } })   // turn 进行中（interrupt 必带 turnId）
     rt.submit(sess.id, 'q2')           // 入队
-    const cp = children[0]
     rt.interrupt(sess.id)
-    expect(cp.killSignals).toContain('SIGTERM')
-    cp.emit('close', null, 'SIGTERM')  // 进程被中断退出，无 turn_end → 合成 aborted
-    await new Promise((r) => setImmediate(r))
+    // driver 发了 turn/interrupt（带 threadId+turnId）+ close client
+    expect(c.requests.some((r: any) => r.method === 'turn/interrupt')).toBe(true)
+    expect(c.closes.length).toBeGreaterThan(0)
+    await flush()
+    // close → onExit 合成 turn_end(aborted) → status aborted
     expect(getSession(db, sess.id)).toMatchObject({ status: 'aborted' })
-    // 队列已清空：不会起第二个进程
-    expect(children.length).toBe(1)
+    // 队列已清空：不会起第二个 client
+    expect(codex.instances.length).toBe(1)
     expect(rt.isRunning(sess.id)).toBe(false)
+  })
+
+  it('codex interrupt（turn/completed status=interrupted 到来）→ mapStatus aborted + run_note + 清队列（carry-forward #1）', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-rt-'))
+    try {
+      const { db, sess, rt, codex } = setup('codex', { transcriptDir: dir })
+      rt.subscribe(sess.id, () => {})
+      rt.submit(sess.id, 'q1')
+      await flush()
+      const c = codex.current()
+      c.notify('turn/started', { turn: { id: 'turn-1', status: 'inProgress' } })
+      rt.submit(sess.id, 'q2')        // 入队
+      // codex turn/interrupt 真链路：turn/completed.status=interrupted 到来（非合成）→ eventMap emit turn_end('interrupted')
+      c.notify('turn/completed', { turn: { id: 'turn-1', status: 'interrupted' } })
+      await flush()
+      // 'interrupted' 归一为 aborted：status aborted + run_note 落库 + 队列清空（不续投 q2）
+      expect(getSession(db, sess.id)).toMatchObject({ status: 'aborted' })
+      const rec = readRecords(dir, sess.id).find((r) => r.type === 'assistant_blocks')!
+      const blocks = (rec.raw as { blocks: Array<Record<string, unknown>> }).blocks
+      expect(blocks.find((b) => b.type === 'run_note')).toMatchObject({ stopReason: 'aborted' })
+      // 第二个 turn/start 没发（队列已清，未续投 q2）
+      expect(c.requests.filter((r: any) => r.method === 'turn/start')).toHaveLength(1)
+    } finally { fs.rmSync(dir, { recursive: true, force: true }) }
   })
 
   it('interrupt 空闲会话：no-op（无活进程不抛）', () => {
@@ -532,17 +764,142 @@ describe('SessionRuntime interrupt', () => {
     expect(rt.isRunning(sess.id)).toBe(false)
   })
 
-  it('dispose（删除会话）：停掉活进程 + 清内存；中断收尾被 disposed 守卫拦下，不回写 DB（对比 interrupt 不写 status=aborted）', async () => {
-    const { db, sess, rt, children } = setup('codex')
+  it('dispose（删除会话）：停掉活 app-server + 清内存；中断收尾被 disposed 守卫拦下，不回写 DB（对比 interrupt 不写 status=aborted）', async () => {
+    const { db, sess, rt, codex } = setup('codex')
     rt.submit(sess.id, 'q1')
-    const cp = children[0]
+    await flush()
+    const c = codex.current()
+    c.notify('turn/started', { turn: { id: 'turn-1', status: 'inProgress' } })
     rt.dispose(sess.id)
-    expect(cp.killSignals).toContain('SIGTERM')        // 底层进程被停
+    expect(c.closes.length).toBeGreaterThan(0)          // 底层 client 被关
     expect(rt.isRunning(sess.id)).toBe(false)           // 内存状态已摘除
-    cp.emit('close', null, 'SIGTERM')                   // 中断退出 → 本会触发 onTurnEnd(aborted)
-    await new Promise((r) => setImmediate(r))
+    await flush()                                       // close → onExit 触发 onTurnEnd(aborted) / onDone
     // 关键：disposed 守卫拦下 onTurnEnd → status 未被改写（interrupt 会写 aborted，dispose 不会），即将被删的会话不产生回写
     expect(getSession(db, sess.id)).toMatchObject({ status: 'idle' })
+  })
+})
+
+describe('SessionRuntime codex app-server 常驻保活 / 档位 / 决策（Part A P3.4）', () => {
+  it('codex 续投：每个新轮都发 turn_start（startTurn 首轮 + serverAlive 续投轮）', async () => {
+    const { sess, rt, codex } = setup('codex')
+    const seen: AgentEvent[] = []
+    rt.subscribe(sess.id, (e) => seen.push(e))
+    rt.submit(sess.id, 'q1')                          // 首轮 startTurn → turn_start #1
+    await flush()
+    const c = codex.current()
+    c.notify('turn/started', { turn: { id: 'turn-1', status: 'inProgress' } })
+    c.notify('turn/completed', { turn: { id: 'turn-1', status: 'completed' } })
+    await flush()                                     // q1 完成、server 保活
+    rt.submit(sess.id, 'q2')                          // 空闲续投 pushUser → turn_start #2
+    await flush()
+    expect(seen.filter((e) => e.type === 'turn_start')).toHaveLength(2)
+  })
+
+  it('codex onResumableId：thread_id 落库为会话 resume 指针（resumableId）', async () => {
+    const { db, sess, rt, codex } = setup('codex')
+    rt.submit(sess.id, 'q1')
+    await flush()
+    void codex   // thread/start 假 response thread.id='th-1' → onResumableId → setResumableId
+    expect(getSession(db, sess.id)).toMatchObject({ resumableId: 'th-1' })
+  })
+
+  it('codex resume：会话有 resumableId → 走 thread/resume（不 thread/start），续接同 thread', async () => {
+    const db = openDatabase(':memory:')
+    const proj = createProject(db, { name: 'p', path: '/work' })
+    const sess = createSession(db, { projectId: proj.id, engine: 'codex', model: 'gpt-5' })
+    db.prepare('UPDATE sessions SET resumable_id = ? WHERE id = ?').run('prev-thread', sess.id)
+    const codex = fakeCodexClient()
+    const rt = new SessionRuntime({ db, resolveBin: () => '/abs/bin', codexClientFactory: codex.factory })
+    rt.submit(sess.id, 'go')
+    await flush()
+    const c = codex.current()
+    expect(c.requests.map((r: any) => r.method)).toEqual(['initialize', 'thread/resume', 'turn/start'])
+    expect((c.requests[1].params as any)).toEqual({ threadId: 'prev-thread' })
+  })
+
+  it('codex resolveDecision：分发到活 codex handle（结构兼容；无活会话静默忽略不抛）', async () => {
+    const { sess, rt, codex } = setup('codex')
+    // 无活会话 → 静默忽略
+    expect(() => rt.resolveDecision(sess.id, 'nope', { behavior: 'allow' })).not.toThrow()
+    // 起 server + 挂一个 server→client 审批请求（itemId=req-1, jsonRpcId=7）
+    rt.submit(sess.id, 'q1')
+    await flush()
+    const c = codex.current()
+    c.notify('turn/started', { turn: { id: 'turn-1', status: 'inProgress' } })
+    c.serverRequest('item/commandExecution/requestApproval', 7, { itemId: 'req-1' })
+    // resolveDecision 分发到 codex handle（Phase 4 才映射决策枚举回执；此处只验不抛 + 路由到 codex 分支）
+    expect(() => rt.resolveDecision(sess.id, 'req-1', { behavior: 'allow' })).not.toThrow()
+  })
+
+  it('codex 档位：submit 带 sandbox/approval/effort → 起 thread/start 传 sandbox/approval、turn/start 传 effort', async () => {
+    const { sess, rt, codex } = setup('codex')
+    rt.submit(sess.id, 'q1', [], { sandbox: 'read-only', approval: 'on-request', effort: 'high' })
+    await flush()
+    const c = codex.current()
+    const threadStart = c.requests.find((r) => r.method === 'thread/start')!
+    expect(threadStart.params).toMatchObject({ sandbox: 'read-only', approvalPolicy: 'on-request' })
+    const turnStart = c.requests.find((r) => r.method === 'turn/start')!
+    expect((turnStart.params as any).effort).toBe('high')
+  })
+
+  it('codex 重水合：会话行持久化的 sandbox/approval → load() 注入 run 态 → 不带 runtime 的 submit 仍传给 thread/start（Part A P3）', async () => {
+    const db = openDatabase(':memory:')
+    const proj = createProject(db, { name: 'p', path: '/work' })
+    const sess = createSession(db, { projectId: proj.id, engine: 'codex', model: 'gpt-5', sandbox: 'danger-full-access', approval: 'never' })
+    const codex = fakeCodexClient()
+    // 全新 runtime（内存无缓存态）→ 首次 load 必从 DB 行重建 run 态
+    const rt = new SessionRuntime({ db, resolveBin: () => '/abs/bin', codexClientFactory: codex.factory })
+    rt.submit(sess.id, 'q1')   // 不带任何 runtime 档位
+    await flush()
+    const threadStart = codex.current().requests.find((r) => r.method === 'thread/start')!
+    expect(threadStart.params).toMatchObject({ sandbox: 'danger-full-access', approvalPolicy: 'never' })
+  })
+
+  it('codex 空闲超时 → endInput 关闭 app-server（避免空闲进程长留）', async () => {
+    const db = openDatabase(':memory:')
+    const proj = createProject(db, { name: 'p', path: '/work' })
+    const sess = createSession(db, { projectId: proj.id, engine: 'codex', model: 'gpt-5' })
+    const codex = fakeCodexClient()
+    const rt = new SessionRuntime({ db, resolveBin: () => '/abs/bin', codexClientFactory: codex.factory, claudeSessionIdleMs: 30 })
+    rt.subscribe(sess.id, () => {})
+    rt.submit(sess.id, 'q1')
+    await flush()
+    const c = codex.current()
+    c.notify('turn/started', { turn: { id: 'turn-1', status: 'inProgress' } })
+    c.notify('turn/completed', { turn: { id: 'turn-1', status: 'completed' } })
+    await flush()                          // q1 完成 → server 保活、起空闲计时
+    expect(c.closes).toEqual([])           // 还没超时，未关
+    await new Promise((r) => setTimeout(r, 60))   // 等空闲超时（30ms）真实流逝 → endInput → close
+    await flush()
+    expect(c.closes.length).toBeGreaterThan(0)
+    expect(rt.isRunning(sess.id)).toBe(false)
+  })
+
+  it('codex 排队消息引用新外部目录 → 不 pushUser 当前 server，排空后 onDone 起新 server 带累积 addDirs（沿用 thread_id）', async () => {
+    const work = fs.mkdtempSync(path.join(os.tmpdir(), 'as-codex-ext-'))
+    const ext = fs.mkdtempSync(path.join(os.tmpdir(), 'as-codex-extB-'))
+    try {
+      const db = openDatabase(':memory:')
+      const proj = createProject(db, { name: 'p', path: work })
+      const sess = createSession(db, { projectId: proj.id, engine: 'codex', model: 'gpt-5' })
+      const codex = fakeCodexClient()
+      const rt = new SessionRuntime({ db, resolveBin: () => '/abs/bin', codexClientFactory: codex.factory })
+      fs.writeFileSync(path.join(ext, 'doc.pdf'), 'x')
+      rt.submit(sess.id, 'm1')                          // server1 起，无外部目录
+      await flush()
+      const c1 = codex.current()
+      c1.notify('turn/started', { turn: { id: 'turn-1', status: 'inProgress' } })
+      rt.submit(sess.id, 'm2', [path.join(ext, 'doc.pdf')])   // 运行中入队，引用新外部目录
+      c1.notify('turn/completed', { turn: { id: 'turn-1', status: 'completed' } })
+      await flush()
+      // ext 未授权给 server1 → 不 pushUser、endInput 排空 → onDone 起 server2
+      expect(codex.instances.length).toBe(2)
+      const c2 = codex.current()
+      // server2 走 thread/resume（沿用 thread_id 'th-1'），收到 m2
+      expect(c2.requests.map((r: any) => r.method)).toEqual(['initialize', 'thread/resume', 'turn/start'])
+      const turnStart = c2.requests.find((r) => r.method === 'turn/start')!
+      expect((turnStart.params as any).input[0].text).toMatch(/^m2/)
+    } finally { fs.rmSync(work, { recursive: true, force: true }); fs.rmSync(ext, { recursive: true, force: true }) }
   })
 })
 
@@ -583,6 +940,76 @@ describe('SessionRuntime 运行时档位（claude 权限/思考强度）', () =>
   it('resolveDecision 委托给活 claude handle（无活会话静默忽略不抛）', async () => {
     const { sess, rt } = setup('claude')
     expect(() => rt.resolveDecision(sess.id, 'nope', { behavior: 'allow' })).not.toThrow()
+  })
+})
+
+describe('SessionRuntime 切到 bypassPermissions：延迟重起拿启动开关（不中途砍、不丢上下文）', () => {
+  // bypass 的真本事 = 进程启动时的 --allow-dangerously-skip-permissions 开关（只能起进程时给）。
+  // 活进程非 bypass 起的 → 中途切 bypass 只能改模式标签、补不回开关 → 必须在下一次 submit 的回合边界沿用 resumableId 重起新进程。
+  it('空闲态切 bypass → 下一次 submit 重起新 query 带 dangerous-skip 开关 + 沿用 resumableId（历史不丢）', async () => {
+    const { sess, rt, claude } = setup('claude')
+    rt.submit(sess.id, 'q1', [], { permissionMode: 'default' })   // query1 起于 default（无开关）
+    await flush()
+    expect(claude.current().options.permissionMode).toBe('default')
+    expect(claude.current().options.allowDangerouslySkipPermissions).toBeFalsy()
+    claude.emit({ type: 'system', subtype: 'init', session_id: 's-1' })   // 拿到 resumableId
+    claude.emit({ type: 'result', stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 } })
+    await flush()                                                 // q1 完成，query 空闲保活
+    rt.setRuntimeConfig(sess.id, { permissionMode: 'bypassPermissions' })   // 空闲态切绕过
+    await flush()
+    rt.submit(sess.id, 'q2')                                      // 下一轮 → 必须重起，而非 pushUser 复用
+    await flush()
+    expect(claude.instances.length).toBe(2)                       // 重起了新 query
+    expect(claude.instances[1].options.permissionMode).toBe('bypassPermissions')
+    expect(claude.instances[1].options.allowDangerouslySkipPermissions).toBe(true)   // 新进程带上启动开关
+    expect(claude.instances[1].options.resume).toBe('s-1')        // 沿用 resumableId 续接 → 历史不丢
+    expect(claude.instances[0].received).toEqual(['q1'])          // q2 没推给旧进程
+    expect(claude.instances[1].received[0]).toBe('q2')            // q2 走新进程
+  })
+
+  it('跑动中切 bypass → 不对活进程热切（避免 CLI bypass_permissions_disabled 退出）、不杀进程、当前轮继续', async () => {
+    const { sess, rt, claude } = setup('claude')
+    rt.submit(sess.id, 'q1', [], { permissionMode: 'default' })   // 跑动中（未 emit result）
+    await flush()
+    rt.setRuntimeConfig(sess.id, { permissionMode: 'bypassPermissions' })   // 跑动中切绕过
+    await flush()
+    expect(claude.current().setPermissionMode).not.toContain('bypassPermissions')   // 没热切（否则可能杀进程）
+    expect(claude.instances.length).toBe(1)                       // 没重起/没杀
+    expect(rt.isRunning(sess.id)).toBe(true)                      // 当前轮继续
+  })
+
+  it('跑动中切 bypass + 同时排队下一条 → 当前轮结束后回合边界重起新 query 投递排队消息（带开关 + resume）', async () => {
+    const { sess, rt, claude } = setup('claude')
+    rt.submit(sess.id, 'q1', [], { permissionMode: 'default' })   // query1 跑动中
+    await flush()
+    claude.emit({ type: 'system', subtype: 'init', session_id: 's-1' })
+    rt.setRuntimeConfig(sess.id, { permissionMode: 'bypassPermissions' })   // 跑动中切绕过（不热切死进程）
+    rt.submit(sess.id, 'q2')                                       // 跑动中再发一条 → 入队
+    await flush()
+    expect(claude.instances.length).toBe(1)                        // 当前轮还在跑，未重起
+    claude.emit({ type: 'result', stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 } })   // 当前轮结束 → onTurnEnd 排空
+    await flush()
+    expect(claude.instances.length).toBe(2)                        // 排队的 q2 须在带开关的新进程跑 → 重起
+    expect(claude.instances[1].options.permissionMode).toBe('bypassPermissions')
+    expect(claude.instances[1].options.allowDangerouslySkipPermissions).toBe(true)
+    expect(claude.instances[1].options.resume).toBe('s-1')         // 沿用 resumableId
+    expect(claude.instances[0].received).toEqual(['q1'])           // q2 没推给旧进程
+    expect(claude.instances[1].received[0]).toBe('q2')
+  })
+
+  it('切到非 bypass 档（plan）→ 仍热切 + 下一次 submit 复用同 query 不重起（边界：重起判定不过宽）', async () => {
+    const { sess, rt, claude } = setup('claude')
+    rt.submit(sess.id, 'q1', [], { permissionMode: 'default' })
+    await flush()
+    claude.emit({ type: 'result', stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 } })
+    await flush()
+    rt.setRuntimeConfig(sess.id, { permissionMode: 'plan' })      // 非 bypass 切换
+    await flush()
+    expect(claude.current().setPermissionMode).toContain('plan')  // 仍走热切
+    rt.submit(sess.id, 'q2')
+    await flush()
+    expect(claude.instances.length).toBe(1)                       // 非 bypass 切换不触发重起
+    expect(claude.current().received).toEqual(['q1', 'q2'])
   })
 })
 

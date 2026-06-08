@@ -1,5 +1,6 @@
 // AppNav.tsx — 顶层导航状态机（替换 Bootstrap）
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useUpdateAvailable } from '../shell/useUpdateAvailable'
 import { api, ApiError } from '../api/client'
 import {
   loadTabs, saveTabs, syncTabsToView, closeTab as closeTabPure, pruneProjects,
@@ -14,17 +15,23 @@ import { Projects } from '../entry/Projects'
 import { Integrations } from '../entry/Integrations'
 import { TaskAutomation } from '../automation/TaskAutomation'
 import { SkillModal } from '../entry/SkillModal'
+import { PreflightModal } from '../entry/PreflightModal'
 import { NewProjectModal } from '../shell/NewProjectModal'
 import { Workspace } from '../workspace/Workspace'
 import { applySessionRuntime, type SessionRuntimeCfg } from '../workspace/sessionRuntimeSync'
-import { RuntimeContext, useRuntimeReducer, CLI_MODELS } from '../workspace/runtimeState'
+import { RuntimeContext, useRuntimeReducer, CLI_MODELS, loadSavedProviderState } from '../workspace/runtimeState'
+import { useSettings } from '../settings/SettingsContext'
+import { NotificationCenter } from '../notifications/NotificationCenter'
+import { Toasts } from '../notifications/Toasts'
+import { activeProviderDefaults } from '../workspace/useActiveProviderModels'
 import type { ProjectDTO, SessionDTO, Engine } from '../api/types'
 
 const DEFAULT_MODEL: Record<Engine, string> = { claude: 'opus', codex: 'gpt-5.5' }
+const DEFAULT_AGENT: Engine = 'claude'
 
-// 从持久化 config 中取引擎默认模型，回落到 DEFAULT_MODEL
-function seedModel(engine: Engine, engineModels: Record<string, string>): string {
-  return engineModels[engine] ?? DEFAULT_MODEL[engine]
+// 种子模型优先级：active provider defaultModel > config engineModels > DEFAULT_MODEL
+function seedModel(engine: Engine, engineModels: Record<string, string>, providerDefaults: Record<string, string> = {}): string {
+  return providerDefaults[engine] || engineModels[engine] || DEFAULT_MODEL[engine]
 }
 
 // 进项目记住上次打开的会话（Issue 28）：按项目存最近活动会话 id。
@@ -38,6 +45,19 @@ function rememberLastSession(projectId: string, sessionId: string): void {
     m[projectId] = sessionId
     localStorage.setItem(LAST_SESSION_KEY, JSON.stringify(m))
   } catch { /* noop */ }
+}
+
+// home 全局 agent 持久化（记住上次在 home 选的引擎，作为 useRuntimeReducer 初始值）
+const LAST_GLOBAL_AGENT_KEY = 'agent-shell:last-global-agent'
+function loadLastGlobalAgent(): Engine {
+  try {
+    const v = localStorage.getItem(LAST_GLOBAL_AGENT_KEY)
+    if (v !== null && (['claude', 'codex'] as Engine[]).includes(v as Engine)) return v as Engine
+  } catch { /* noop */ }
+  return DEFAULT_AGENT
+}
+function saveLastGlobalAgent(engine: Engine): void {
+  try { localStorage.setItem(LAST_GLOBAL_AGENT_KEY, engine) } catch { /* noop */ }
 }
 
 type Phase =
@@ -55,13 +75,27 @@ export function AppNav() {
   const [showNewProject, setShowNewProject] = useState(false)
   const [showSkill, setShowSkill] = useState(false)
   const [skills, setSkills] = useState<string[]>([])
+  // composerSeed：Integrations 点「安装」→ goHome() + 预填首页 composer；Home 消费后清空
+  const [composerSeed, setComposerSeed] = useState('')
+  // 内置技能 effectiveName 集合（sourceId==='builtin'）：徽标计数时排除——内置始终注入、不算用户选的
+  const [builtinNames, setBuiltinNames] = useState<Set<string>>(() => new Set())
+  const [preflight, setPreflight] = useState<{ missingSkills: string[]; hasConflict: boolean; resume: (skills: string[] | null) => void } | null>(null)
+  const { openSettings } = useSettings()
   // 已打开的会话 tab（Issue 23）：仅这些排成左侧 tab 条，其余留历史下拉；× 仅关 tab 不删会话。
   const [openSessionIds, setOpenSessionIds] = useState<string[]>([])
-  // home runtime（Topbar 切换器 + 发送建会话用）
-  const [runtime, rtDispatch] = useRuntimeReducer('claude', CLI_MODELS.claude[0].value)
+  // home runtime（Topbar 切换器 + 发送建会话用）；从 localStorage 读取上次选中的 agent 作为初始值
+  // useRef：只在首渲染读一次 localStorage（useRuntimeReducer 懒初始化仅用首次，后续渲染白读）
+  const lastAgent = useRef(loadLastGlobalAgent()).current
+  const [runtime, rtDispatch] = useRuntimeReducer(lastAgent, CLI_MODELS[lastAgent][0].value)
   // 持久化的每引擎默认模型（来自 config.json engineModels）；新建会话用它作 model，回落 DEFAULT_MODEL
   const [engineModels, setEngineModels] = useState<Record<string, string>>({})
+  // active provider 各引擎 defaultModel（自定义 Provider 时优先）
+  const [providerDefaults, setProviderDefaults] = useState<Record<string, string>>({})
+  useEffect(() => { api.listProviders().then((r) => setProviderDefaults(activeProviderDefaults(r))).catch(() => {}) }, [])
+  // home runtime engine 变化时持久化，供下次启动初始化用
+  useEffect(() => { saveLastGlobalAgent(runtime.engine) }, [runtime.engine])
 
+  const update = useUpdateAvailable()
   // 顶部页签：独立持久状态（localStorage），与 phase 解耦——phase 当"路由"，每次变就把页签列表与之对账。
   const [tabs, setTabs] = useState<TabsState>(() => loadTabs(Date.now()))
   useEffect(() => { saveTabs(tabs) }, [tabs])
@@ -109,6 +143,12 @@ export function AppNav() {
       const cfg = await api.getConfig()
       if (cfg.engineModels) setEngineModels(cfg.engineModels)
     } catch { /* 静默，回落 DEFAULT_MODEL */ }
+    // 播种 home 默认注入集：技能库里标了 autoInject 的技能，作为新建项目的默认勾选（用户可在 SkillModal 改）
+    try {
+      const { skills: lib } = await api.listSkillLibrary()
+      setSkills(lib.filter((s) => s.autoInject).map((s) => s.effectiveName))
+      setBuiltinNames(new Set(lib.filter((s) => s.sourceId === 'builtin').map((s) => s.effectiveName)))
+    } catch { /* 播种失败不致命 */ }
     const ps = await reloadProjects()
     setTabs((s) => pruneProjects(s, new Set(ps.map((p) => p.id))))   // 丢掉指向已删项目的页签
     setPhase({ tag: 'home' })
@@ -133,7 +173,8 @@ export function AppNav() {
     let sessions = (await api.listSessions(project.id)).sessions
     let session = sessions[0]
     if (!session) {
-      const { sessionId } = await api.createSession({ projectId: project.id, engine: runtime.engine, model: seedModel(runtime.engine, engineModels) })
+      const agent = project.selectedAgent ?? DEFAULT_AGENT
+      const { sessionId } = await api.createSession({ projectId: project.id, engine: agent, model: seedModel(agent, engineModels, providerDefaults) })
       sessions = (await api.listSessions(project.id)).sessions
       session = sessions.find((s) => s.id === sessionId) ?? sessions[0]
     } else {
@@ -144,7 +185,7 @@ export function AppNav() {
     rememberLastSession(project.id, session.id)
     setOpenSessionIds([session.id])   // 进项目只把当前会话上 tab，其余留历史下拉（Issue 23）
     setPhase({ tag: 'workspace', project, session, sessions, initialMessage })
-  }, [runtime.engine, engineModels])
+  }, [engineModels, providerDefaults])
 
   const openProjectById = useCallback(async (id: string) => {
     const p = projects.find((x) => x.id === id)
@@ -153,7 +194,20 @@ export function AppNav() {
 
   // home 发送 = 建项目 + 落盘暂存附件到 attachments/ + 建会话 + 进 workspace 自动提交首条
   const homeSend = useCallback(async (text: string, staged: HomeAttachment[] = []) => {
-    const { projectId, path } = await api.createProject('未命名项目', skills)
+    let effectiveSkills = skills
+    if (skills.length > 0) {
+      const { conflicts, missing } = await api.skillConfigCheck(skills)
+      if (missing.length > 0 || conflicts.length > 0) {
+        const missingSkills = [...new Set(missing.map((m) => m.entityRef.replace(/^skill:/, '')))]
+        const decision = await new Promise<string[] | null>((resolve) => {
+          setPreflight({ missingSkills, hasConflict: conflicts.length > 0, resume: resolve })
+        })
+        setPreflight(null)
+        if (decision === null) return   // 去配置/关闭 → 中止，不建项目
+        effectiveSkills = decision
+      }
+    }
+    const { projectId, path } = await api.createProject('未命名项目', effectiveSkills)
     // 暂存附件落盘到 <project>/attachments/：path 项 fs 复制、blob 项上传字节；都收相对路径
     const contextFiles: string[] = []
     const pathItems = staged.filter((s) => s.kind === 'path')
@@ -166,14 +220,26 @@ export function AppNav() {
       try { const { file } = await api.uploadPaste(projectId, s.blob, s.name); contextFiles.push(file.path) }
       catch { /* 单个附件上传失败不阻塞发送 */ }
     }
-    const { sessionId } = await api.createSession({ projectId, engine: runtime.engine, model: seedModel(runtime.engine, engineModels) })
+    const newAgent = runtime.engine
+    const { sessionId } = await api.createSession({ projectId, engine: newAgent, model: seedModel(newAgent, engineModels, providerDefaults) })
+    void api.patchProject(projectId, { selectedAgent: newAgent }).catch(() => {})
     const sessions = (await api.listSessions(projectId)).sessions
     const session = sessions.find((s) => s.id === sessionId) ?? sessions[0]
-    const project: ProjectDTO = { id: projectId, name: '未命名项目', path, createdAt: Date.now(), status: 'idle', engine: runtime.engine }
+    const project: ProjectDTO = { id: projectId, name: '未命名项目', path, createdAt: Date.now(), status: 'idle', engine: newAgent, selectedAgent: newAgent }
     projectsMutSeq.current++   // 标记乐观改动：防在途旧 reload 把新建项目覆盖掉
     setProjects((prev) => prev.some((x) => x.id === projectId) ? prev : [project, ...prev])   // 乐观入列：页签标题/改名按 id 查得到
     setPhase({ tag: 'workspace', project, session, sessions, initialMessage: text, initialContextFiles: contextFiles })
-  }, [runtime.engine, skills, engineModels])
+  }, [runtime.engine, skills, engineModels, providerDefaults])
+
+  // seedComposerAndGoHome：把一段提示词塞进首页 composer + 跳回首页（Integrations 点「安装」、自动化 agent-led 新建/编辑都走它）；
+  // Home 的 useEffect 监听 composerSeed 填入输入框，消费后回调 clearComposerSeed 清种子。
+  const seedComposerAndGoHome = useCallback((text: string) => {
+    setComposerSeed(text)
+    setPhase({ tag: 'home' })
+    void reloadProjects().catch(() => {})
+  }, [reloadProjects])
+  // 稳定引用：Home 的 useEffect 依赖它，避免每次 render 新函数引用导致 deps 抖动
+  const clearComposerSeed = useCallback(() => setComposerSeed(''), [])
 
   // 先切视图（本地状态，必定生效）再后台刷新——导航不被网络刷新挟持，刷新失败也不会把人卡在 workspace。
   const goHome = useCallback(() => { setPhase({ tag: 'home' }); void reloadProjects().catch(() => {}) }, [reloadProjects])
@@ -193,6 +259,13 @@ export function AppNav() {
     setOpenSessionIds([session.id])
     setPhase({ tag: 'workspace', project: p, session, sessions, initialMessage: undefined })
   }, [projects, reloadProjects])
+
+  // 点击 macOS 系统通知 → 主进程聚焦窗口（T5 showMainWindow）+ 推 reminderActivate → 这里跳到对应会话。
+  // 早挂载（AppNav 是顶层），保证订阅就绪早于可能的 activate 推送；卸载退订防泄漏。
+  useEffect(() => {
+    const off = window.agentShell?.onReminderActivate((p) => { void onOpenAutomationSession(p.projectId, p.sessionId) })
+    return off
+  }, [onOpenAutomationSession])
 
   // —— 页签交互 ——
   // 把某个 TabView 导航生效：entry 单例各切对应 phase，project 进项目。
@@ -265,6 +338,34 @@ export function AppNav() {
     void api.patchSession(id, patch)
   }, [])
 
+  // 切代理·未发送会话「原地变身」（D5）：把本会话引擎/模型换成新引擎，并把项目默认也设为新引擎。
+  // 乐观清 permissionMode/effort（让 Workspace 按 session.engine 重挂后 initialRuntime 走投影 bag 取新引擎档位）；
+  // 落库 patchSession({engine,model})（daemon 同时重置该会话四权限列）+ patchProject(selectedAgent)。
+  // 新模型取投影 bag 里新引擎上次用过的，缺则 seedModel（与 home/openProject 同一种子优先级）。
+  const onChangeSessionEngine = useCallback((sessionId: string, projectId: string, newEngine: Engine) => {
+    const saved = loadSavedProviderState()
+    const newModel = saved.model?.[newEngine] ?? seedModel(newEngine, engineModels, providerDefaults)
+    setPhase((prev) => {
+      if (prev.tag !== 'workspace') return prev
+      const reset = (s: SessionDTO): SessionDTO => ({ ...s, engine: newEngine, model: newModel, permissionMode: null, effort: null })
+      return {
+        ...prev,
+        sessions: prev.sessions.map((s) => (s.id === sessionId ? reset(s) : s)),
+        session: prev.session.id === sessionId ? reset(prev.session) : prev.session,
+        project: prev.project.id === projectId ? { ...prev.project, selectedAgent: newEngine } : prev.project,
+      }
+    })
+    void api.patchSession(sessionId, { engine: newEngine, model: newModel }).catch(() => {})
+    void api.patchProject(projectId, { selectedAgent: newEngine }).catch(() => {})
+  }, [engineModels, providerDefaults])
+
+  // 切代理·已发送会话「只设项目默认」（D5）：不动当前会话，只把 project.selectedAgent 设为新引擎（下次「+新建」才用）。
+  const onSetProjectDefault = useCallback((projectId: string, newEngine: Engine) => {
+    setPhase((prev) => (prev.tag === 'workspace' && prev.project.id === projectId
+      ? { ...prev, project: { ...prev.project, selectedAgent: newEngine } } : prev))
+    void api.patchProject(projectId, { selectedAgent: newEngine }).catch(() => {})
+  }, [])
+
   const handleProjectCreated = useCallback(async (id: string) => {
     setShowNewProject(false)
     const ps = await reloadProjects()
@@ -314,6 +415,8 @@ export function AppNav() {
       onSelectTab={onSelectTab}
       onCloseTab={onCloseTab}
       onNewTab={() => goHome()}
+      update={update}
+      chromeRight={<NotificationCenter onOpenSession={(pid, sid) => void onOpenAutomationSession(pid, sid)} />}
     />
   )
 
@@ -322,7 +425,8 @@ export function AppNav() {
     // 项目标题与顶部页签同源：都按 id 现查 live projects（改名后唯一数据源即时刷新），projects 暂缺时回落 phase 快照。
     const liveProjectName = projects.find((p) => p.id === project.id)?.name ?? project.name
     const newSession = async () => {
-      const { sessionId } = await api.createSession({ projectId: project.id, engine: runtime.engine, model: seedModel(runtime.engine, engineModels) })
+      const agent = project.selectedAgent ?? DEFAULT_AGENT
+      const { sessionId } = await api.createSession({ projectId: project.id, engine: agent, model: seedModel(agent, engineModels, providerDefaults) })
       const ss = (await api.listSessions(project.id)).sessions
       const found = ss.find((s) => s.id === sessionId) ?? ss[0]
       if (found) {
@@ -348,7 +452,8 @@ export function AppNav() {
         rememberLastSession(project.id, next.id)
         setPhase((prev) => (prev.tag === 'workspace' ? { ...prev, session: next, sessions: remaining, initialMessage: undefined } : prev))
       } else {
-        const { sessionId } = await api.createSession({ projectId: project.id, engine: runtime.engine, model: seedModel(runtime.engine, engineModels) })
+        const agent = project.selectedAgent ?? DEFAULT_AGENT
+        const { sessionId } = await api.createSession({ projectId: project.id, engine: agent, model: seedModel(agent, engineModels, providerDefaults) })
         const ss = (await api.listSessions(project.id)).sessions
         const found = ss.find((s) => s.id === sessionId) ?? ss[0]
         if (found) {
@@ -361,7 +466,7 @@ export function AppNav() {
     return (
       <>
         <Workspace
-          key={session.id}
+          key={`${session.id}:${session.engine}`}
           projectId={project.id}
           projectName={liveProjectName}
           projectPath={project.path}
@@ -381,9 +486,13 @@ export function AppNav() {
           onNewProject={() => setShowNewProject(true)}
           onRename={(name) => onRenameActiveProject(project.id, name)}
           onPatchSession={onPatchSession}
+          onChangeSessionEngine={onChangeSessionEngine}
+          onSetProjectDefault={onSetProjectDefault}
           onDeleteSession={(id) => void deleteSession(id)}
+          selectedAgent={project.selectedAgent}
         />
         {showNewProject && <NewProjectModal onClose={() => setShowNewProject(false)} onCreated={(id) => void handleProjectCreated(id)} />}
+        <Toasts onOpenSession={(pid, sid) => void onOpenAutomationSession(pid, sid)} />
       </>
     )
   }
@@ -398,15 +507,26 @@ export function AppNav() {
         topbar={<Topbar />}
       >
         {phase.tag === 'integrations'
-          ? <Integrations />
+          ? <Integrations onInstallSeed={seedComposerAndGoHome} />
           : phase.tag === 'automations'
-            ? <TaskAutomation projects={projects} onOpenSession={(pid, sid) => void onOpenAutomationSession(pid, sid)} />
+            ? <TaskAutomation projects={projects} onOpenSession={(pid, sid) => void onOpenAutomationSession(pid, sid)} onComposeToHome={seedComposerAndGoHome} />
             : phase.tag === 'projects'
               ? <Projects projects={projects} onOpenProject={(id) => void openProjectById(id)} onRenameProject={onRenameProject} onDeleteProjects={onDeleteProjects} />
-              : <Home projects={projects} onSend={(t, staged) => void homeSend(t, staged)} onOpenProject={(id) => void openProjectById(id)} onViewAll={() => void goProjects()} skillCount={skills.length} onOpenSkillModal={() => setShowSkill(true)} />}
+              : <Home projects={projects} onSend={(t, staged) => void homeSend(t, staged)} onOpenProject={(id) => void openProjectById(id)} onViewAll={() => void goProjects()} skillCount={skills.filter((s) => !builtinNames.has(s)).length} onOpenSkillModal={() => setShowSkill(true)} composerSeed={composerSeed} onSeedConsumed={clearComposerSeed} />}
       </EntryShell>
       {showNewProject && <NewProjectModal onClose={() => setShowNewProject(false)} onCreated={(id) => void handleProjectCreated(id)} />}
       {showSkill && <SkillModal initialSelected={skills} onClose={() => setShowSkill(false)} onDone={(s) => { setSkills(s); setShowSkill(false) }} />}
+      {preflight && (
+        <PreflightModal
+          missingSkills={preflight.missingSkills}
+          hasConflict={preflight.hasConflict}
+          onGoConfig={() => { preflight.resume(null); openSettings('secrets') }}
+          onRunAnyway={() => preflight.resume(skills)}
+          onDrop={() => preflight.resume(skills.filter((s) => !preflight.missingSkills.includes(s)))}
+          onClose={() => preflight.resume(null)}
+        />
+      )}
+      <Toasts onOpenSession={(pid, sid) => void onOpenAutomationSession(pid, sid)} />
     </RuntimeContext.Provider>
   )
 }

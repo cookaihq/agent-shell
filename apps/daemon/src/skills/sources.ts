@@ -7,6 +7,7 @@ export interface SourceStore {
   patch: (id: string, partial: PatchSourceReq) => SkillSourceDef
   remove: (id: string) => void
   reorder: (order: string[]) => void
+  upsert: (def: SkillSourceDef) => void
 }
 
 export function makeSourceStore(file: string): SourceStore {
@@ -40,5 +41,10 @@ export function makeSourceStore(file: string): SourceStore {
     reorder: (order) => {
       const cur = readRaw(); const pos = new Map(order.map((id, i) => [id, i]))
       writeRaw(cur.map(s => ({ ...s, sortIndex: pos.get(s.id) ?? s.sortIndex }))) },
+    upsert: (def) => {
+      const cur = readRaw(); const i = cur.findIndex(s => s.id === def.id)
+      if (i >= 0) { cur[i] = SkillSourceDef.parse(def); writeRaw(cur) }
+      else { writeRaw([...cur, SkillSourceDef.parse(def)]) }
+    },
   }
 }

@@ -1,6 +1,6 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron')
 
-import type { AgentShellBridge } from '@agent-shell/contracts'
+import type { AgentShellBridge, UpdateState } from '@agent-shell/contracts'
 
 // 通道名与 contracts 的 DESKTOP_IPC 重复声明（故意）：preload 保持 dependency-free，
 // 不因引入 contracts 运行时值把 zod 等拖进沙箱 preload（贴 open-design preload 纪律）。
@@ -14,6 +14,13 @@ const OPEN_PATH = 'agent-shell:open-path'
 const OPEN_EXTERNAL = 'agent-shell:open-external'
 const TRASH_ITEM = 'agent-shell:trash-item'
 const SHOW_ITEM = 'agent-shell:show-item'
+const UPDATE_STATE = 'agent-shell:update-state'
+const UPDATE_AVAILABLE = 'agent-shell:update-available'
+// 提醒 IPC 通道（T5 实现 daemon→main 触发，此处仅 preload 订阅转发到 renderer）
+const SHOW_REMINDER = 'agent-shell:show-reminder'
+const REMINDER_ACTIVATE = 'agent-shell:reminder-activate'
+const DETECT_EDITORS = 'agent-shell:detect-editors'
+const OPEN_IN_EDITOR = 'agent-shell:open-in-editor'
 
 const bridge: AgentShellBridge = {
   // 同步取主进程持有的 per-process 会话密钥：preload 早于 renderer JS 执行，
@@ -34,6 +41,26 @@ const bridge: AgentShellBridge = {
     ipcRenderer.invoke(TRASH_ITEM, absPaths) as Promise<{ ok: boolean; failed: string[] }>,
   showItemInFolder: (absPath: string) =>
     ipcRenderer.invoke(SHOW_ITEM, absPath) as Promise<{ ok: boolean; error?: string }>,
+  getUpdateState: () => ipcRenderer.sendSync(UPDATE_STATE) as UpdateState | null,
+  onUpdateAvailable: (cb: (s: UpdateState) => void) => {
+    const handler = (_e: unknown, s: UpdateState) => cb(s)
+    ipcRenderer.on(UPDATE_AVAILABLE, handler)
+    return () => { ipcRenderer.off(UPDATE_AVAILABLE, handler) }
+  },
+  // T5 实现：renderer → main 请求弹系统通知（fire-and-forget send）
+  showReminder: (payload: import('@agent-shell/contracts').ReminderNotify) => {
+    ipcRenderer.send(SHOW_REMINDER, payload)
+  },
+  // T5 实现：main → renderer 通知点击激活（订阅，主进程 webContents.send 推）
+  onReminderActivate: (cb) => {
+    const handler = (_e: unknown, p: import('@agent-shell/contracts').ReminderActivate) => cb(p)
+    ipcRenderer.on(REMINDER_ACTIVATE, handler)
+    return () => { ipcRenderer.off(REMINDER_ACTIVATE, handler) }
+  },
+  detectEditors: () =>
+    ipcRenderer.invoke(DETECT_EDITORS) as Promise<import('@agent-shell/contracts').EditorEntry[]>,
+  openInEditor: (id: string, absPath: string) =>
+    ipcRenderer.invoke(OPEN_IN_EDITOR, id, absPath) as Promise<{ ok: boolean; error?: string }>,
 }
 
 contextBridge.exposeInMainWorld('agentShell', bridge)

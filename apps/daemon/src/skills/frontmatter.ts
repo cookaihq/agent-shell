@@ -1,16 +1,18 @@
-/** 最小 SKILL.md frontmatter 解析：取 name + description（支持行内与 |/> 块标量）。不依赖 yaml 库。 */
-export function parseSkillFrontmatter(md: string): { name?: string; description?: string } {
+/** 最小 SKILL.md frontmatter 解析：取 name + description + autoInject（支持行内与 |/> 块标量）。不依赖 yaml 库。 */
+export function parseSkillFrontmatter(md: string): { name?: string; description?: string; autoInject?: boolean } {
   const m = md.match(/^---\n([\s\S]*?)\n---/)
   if (!m) return {}
   const lines = m[1].split('\n')
-  const out: { name?: string; description?: string } = {}
+  const out: { name?: string; description?: string; autoInject?: boolean } = {}
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
     const kv = line.match(/^([A-Za-z_][\w-]*):\s?(.*)$/)
     if (!kv) continue
     const key = kv[1], val = kv[2]
-    if (key !== 'name' && key !== 'description') continue
-    if (val === '|' || val === '>' || val === '|-' || val === '>-') {
+    if (key !== 'name' && key !== 'description' && key !== 'autoInject') continue
+    if (key === 'autoInject') {
+      out.autoInject = val.trim() === 'true'
+    } else if (val === '|' || val === '>' || val === '|-' || val === '>-') {
       // 块标量：收集后续缩进行直到下一个顶层 key 或结束
       const block: string[] = []
       for (let j = i + 1; j < lines.length; j++) {

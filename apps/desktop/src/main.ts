@@ -1,11 +1,13 @@
 import path from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { readFileSync, writeFileSync } from 'node:fs'
-import { app, BrowserWindow, ipcMain, dialog, Menu, Tray, nativeImage, shell, type MenuItemConstructorOptions } from 'electron'
-import { DESKTOP_IPC } from '@agent-shell/contracts'
+import { execFile } from 'node:child_process'
+import { app, BrowserWindow, ipcMain, dialog, Menu, Tray, nativeImage, shell, Notification, type MenuItemConstructorOptions } from 'electron'
+import { DESKTOP_IPC, type UpdateState, type ReminderNotify, type ReminderActivate, type EditorEntry } from '@agent-shell/contracts'
 import { discoverDaemonUrl } from '@agent-shell/sidecar'
 import { startDaemonProcess, type DaemonHandle } from './daemonProcess'
 import { initUpdater } from './updater'
+import { listEditors, detectInstalled, resolveOpen, resolveLabel, defaultDetectDeps, defaultOpenDeps } from './editors'
 import { startAutomationNotifier, type AutomationNotifier } from './automationNotify'
 
 // 说明：本文件经 esbuild 打成 CJS（dist/main.cjs），上面的具名导入会被转成
@@ -16,6 +18,12 @@ import { startAutomationNotifier, type AutomationNotifier } from './automationNo
 // renderer 产物：build 把 renderer/web-dist 拷到 desktop dist/web；main.cjs 在 dist/ 下，故同级 ./web。
 // 统一布局（M8d）——dev(electron dist/main.cjs) 与打包(Resources/app/dist/main.cjs) 解析一致，无需 app.isPackaged 分支。
 const webDir = path.resolve(__dirname, 'web')
+// §9 builtin 源：build 把 daemon/src/builtin-skills 拷到 desktop dist/builtin-skills；与 web 同级，路径一致。
+const builtinSkillsDir = path.resolve(__dirname, 'builtin-skills')
+// §16.3 builtin automation：build 把 daemon/src/builtin-automations 拷到 dist/builtin-automations；与 web 同级。
+const builtinAutomationsDir = path.resolve(__dirname, 'builtin-automations')
+// §10 create_automation（codex）：build 把 stdio MCP server 打成 dist/automation-mcp.bundle.mjs；与 main.cjs 同级。
+const automationMcpEntry = path.resolve(__dirname, 'automation-mcp.bundle.mjs')
 
 // per-process 会话密钥：传给 daemon（开 gate）+ 经 preload 注入 renderer（带 token）。生产环境每次启动新生成。
 const authSecret = randomBytes(32).toString('base64url')
@@ -34,6 +42,8 @@ let daemon: DaemonHandle | null = null
 // 托盘常驻：关窗不退、daemon 存活、调度器照跑（spec §2）。仅托盘「退出」/ Cmd+Q 置 isQuitting 才真退。
 let tray: Tray | null = null
 let mainWindow: BrowserWindow | null = null
+// 主进程持有的"当前可用更新"：updater 检测到即写入；窗口重建后渲染进程经 getUpdateState 一查即得（与窗口生命周期解耦）。
+let availableUpdate: UpdateState | null = null
 let isQuitting = false
 // 当前 daemon URL（URL 发现轮询写入）：托盘重开窗口 / 通知点击重建窗口时直接复用，无需重新等发现。
 let currentDaemonUrl: string | null = null
@@ -189,6 +199,15 @@ function ensureNotifier(url: string): void {
   notifier = startAutomationNotifier({ url, authSecret, onActivate: () => showMainWindow() })
 }
 
+// 用 execFile 跑打开命令（数组传参防注入）。win 下 launcher 常是 .cmd，需 shell 解析。
+function execOpen(file: string, args: string[]): Promise<{ ok: boolean; error?: string }> {
+  return new Promise(resolve => {
+    execFile(file, args, { shell: process.platform === 'win32' }, (err) => {
+      resolve(err ? { ok: false, error: err.message } : { ok: true })
+    })
+  })
+}
+
 // IPC 句柄一次性注册（whenReady 调一次）：ipcMain.handle 重复注册会抛错，故不能放进可被托盘多次调用的 createWindow。
 function registerIpcHandlers(): void {
   // sendSync 取密钥：preload 同步拿，renderer 首请求前就绪
@@ -234,6 +253,51 @@ function registerIpcHandlers(): void {
     if (typeof absPath !== 'string' || !absPath) return { ok: false, error: 'invalid path' }
     try { shell.showItemInFolder(absPath); return { ok: true } }
     catch (e) { return { ok: false, error: e instanceof Error ? e.message : 'show failed' } }
+  })
+  // 检测本机已安装的编辑器（按平台过滤+排序）。逐条 try/catch，单条失败按未安装计、不崩整列表。
+  ipcMain.handle(DESKTOP_IPC.detectEditors, async (): Promise<EditorEntry[]> => {
+    const plat = process.platform
+    return listEditors(plat).map(def => {
+      let installed = false
+      try { installed = detectInstalled(def, plat, defaultDetectDeps) } catch { installed = false }
+      return { id: def.id, label: resolveLabel(def, plat), installed }
+    })
+  })
+  // 用指定编辑器打开项目根绝对路径。id 必须命中当前平台 catalog 白名单；launcher 优先、open -a/shell 兜底。
+  ipcMain.handle(DESKTOP_IPC.openInEditor, async (_e, id: unknown, absPath: unknown) => {
+    if (typeof id !== 'string' || typeof absPath !== 'string' || !absPath) return { ok: false, error: 'invalid args' }
+    const def = listEditors(process.platform).find(d => d.id === id)
+    if (!def) return { ok: false, error: 'unknown editor' }
+    const action = resolveOpen(def, process.platform, absPath, defaultOpenDeps)
+    if (action.type === 'shellOpenPath') {
+      const error = await shell.openPath(absPath)
+      return { ok: !error, error: error || undefined }
+    }
+    return execOpen(action.file, action.args)
+  })
+  ipcMain.on(DESKTOP_IPC.updateState, (e) => { e.returnValue = availableUpdate })
+  // renderer 请求弹系统通知（T5）：主进程负责 Notification，点击后聚焦窗口并推 reminderActivate 给 renderer
+  ipcMain.on(DESKTOP_IPC.showReminder, (_e, payload: ReminderNotify) => {
+    if (!Notification.isSupported()) return
+    const n = new Notification({ title: payload.title, body: payload.body })
+    n.on('click', () => {
+      showMainWindow()
+      // 窗口重建是异步的（createWindow），但 mainWindow 赋值在 createWindow 入口同步发生；
+      // 若窗口刚重建，稍微延迟一帧让 webContents ready 后再 send（照 automationNotify 点击 → showMainWindow 模式）。
+      const sendActivate = (): void => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          const activate: ReminderActivate = { projectId: payload.projectId, sessionId: payload.sessionId }
+          mainWindow.webContents.send(DESKTOP_IPC.reminderActivate, activate)
+        }
+      }
+      // 若是重建窗口（mainWindow 刚被置 null，createWindow 异步中），等一个宏任务
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        sendActivate()
+      } else {
+        setTimeout(sendActivate, 300)
+      }
+    })
+    n.show()
   })
 }
 
@@ -281,7 +345,7 @@ async function createWindow(): Promise<void> {
   } else {
     await win.loadURL(pendingHtml())
   }
-  if (!daemon) daemon = startDaemonProcess({ webDir, namespace: DAEMON_NAMESPACE, authSecret, dataDir: DATA_DIR, projectsDir: PROJECTS_DIR })
+  if (!daemon) daemon = startDaemonProcess({ webDir, namespace: DAEMON_NAMESPACE, authSecret, dataDir: DATA_DIR, projectsDir: PROJECTS_DIR, builtinSkillsDir, builtinAutomationsDir, automationMcpEntry })
   startUrlDiscoveryLoop(win)
 }
 
@@ -322,7 +386,14 @@ app.whenReady().then(async () => {
   registerIpcHandlers()   // IPC 句柄一次性注册（createWindow 可被托盘多次调用，不能在那注册）
   createTray()            // 菜单栏托盘常驻入口
   await createWindow()
-  if (!IS_DEV_CHANNEL) initUpdater()   // dev 渠道不查更新（不引导去下正式版）；正式版照旧仅打包态查
+  // dev 渠道不查更新（不引导去下正式版）；正式版照旧仅打包态查。
+  // 检测到新版：存一份 + 推给当前窗口（前端已开着即时点亮图标；窗口未就绪则靠 getUpdateState 兜底）。
+  if (!IS_DEV_CHANNEL) initUpdater({
+    onAvailable: (s) => {
+      availableUpdate = s
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(DESKTOP_IPC.updateAvailable, s)
+    },
+  })
 }).catch((err) => {
   console.error('[desktop] 启动失败:', err)
   app.quit()
@@ -334,6 +405,10 @@ app.on('window-all-closed', () => {
   if (isQuitting) app.quit()
   // 否则什么都不做：留在托盘后台守时
 })
+
+// 点 Dock 图标（mac）/ 重新激活 app：有窗口聚焦、无窗口重建（daemon 仍在跑），与托盘「打开」同语义。
+// 缺了它 → 关窗后 app 进程仍在（window-all-closed 不退），但点 Dock 图标无人接 activate → 看似「点了没反应」。
+app.on('activate', () => showMainWindow())
 
 // Cmd+Q / 系统退出 / 托盘退出都经此：置 isQuitting（让 window-all-closed 走真退），停通知订阅 + daemon。
 app.on('before-quit', async () => {

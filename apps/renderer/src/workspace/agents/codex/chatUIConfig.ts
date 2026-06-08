@@ -86,13 +86,14 @@ export const codexChatUIConfig: ChatUIConfig = {
     return STATIC_MODELS.find((m) => m.value === value)?.label ?? value
   },
 
-  getModelSection(state): ModelSection {
-    const current = STATIC_MODELS.find((m) => m.value === state.model) ?? STATIC_MODELS[0]
-    return { list: STATIC_MODELS, current, collapsed: false, groupLabel: 'Codex CLI' }
+  getModelSection(state, _dyn, providerModels): ModelSection {
+    const list = providerModels && providerModels.length > 0 ? providerModels : STATIC_MODELS
+    const current = list.find((m) => m.value === state.model) ?? list[0]
+    return { list, current, collapsed: false, groupLabel: 'Codex CLI' + (providerModels && providerModels.length > 0 ? ' · Provider' : '') }
   },
 
-  getModelOptions() {
-    return STATIC_MODELS
+  getModelOptions(_state, _dyn, providerModels) {
+    return providerModels && providerModels.length > 0 ? providerModels : STATIC_MODELS
   },
 
   getModeSelector(state): ModeSegment[] {

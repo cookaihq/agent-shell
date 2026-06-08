@@ -88,16 +88,18 @@ export const claudeChatUIConfig: ChatUIConfig = {
     return hit?.label ?? value
   },
 
-  getModelSection(state, dyn): ModelSection {
-    const list = alignedModels(dyn)
+  getModelSection(state, dyn, providerModels): ModelSection {
+    const hasPm = !!(providerModels && providerModels.length > 0)
+    const list = hasPm ? providerModels! : alignedModels(dyn)
     const current = list.find((m) => m.value === state.model) ?? list[0]
-    const dynamic = !!(dyn && dyn.length > 0)
-    return { list, current, collapsed: true, groupLabel: 'Claude Code' + (dynamic ? ' · 动态' : '') }
+    const dynamic = !hasPm && !!(dyn && dyn.length > 0)
+    return { list, current, collapsed: true, groupLabel: 'Claude Code' + (hasPm ? ' · Provider' : dynamic ? ' · 动态' : '') }
   },
 
-  // 原始可选列表（不对齐）：dyn 有 → dyn 原表；否则静态全表（含裸 'opus'）。
+  // 原始可选列表（不对齐）：providerModels 有 → 优先用；否则 dyn 有 → dyn 原表；否则静态全表（含裸 'opus'）。
   // 既是 RuntimeSwitcher 下拉源，也是 runtimeState 成员校验源（含状态合法 value）。
-  getModelOptions(_state, dyn) {
+  getModelOptions(_state, dyn, providerModels) {
+    if (providerModels && providerModels.length > 0) return providerModels
     return dyn && dyn.length > 0 ? dyn : STATIC_MODELS
   },
 

@@ -15,8 +15,10 @@ import { useRuntime, RISK_COLOR, slotsOf } from './runtimeState'
 import type { RuntimeState, RuntimeAction } from './runtimeState'
 import { SLICES } from './agents/registry'
 import type { UIModelOption, ModeSegment } from './agents/types'
-import type { SlashCommand } from '../api/types'
+import type { SlashCommand, Engine } from '../api/types'
 import { SkillModal } from '../entry/SkillModal'
+import { useActiveProviderModels } from './useActiveProviderModels'
+import { resolveModelDisplay } from './modelDisplay'
 
 // 右箭头（折叠行尾，点击呼出 flyout）。移植自原型 app.js CARET。
 const CARET_SVG = (
@@ -52,6 +54,9 @@ export function ModelPill({
   const { runtime, dispatch } = useRuntime()
   const [open, setOpen] = useState(false)
   const [skillOpen, setSkillOpen] = useState(false)
+  const [modelAliases, setModelAliases] = useState<Record<string, Record<string, string>>>({})
+  useEffect(() => { api.getConfig().then((c) => setModelAliases(c.modelAliases ?? {})).catch(() => {}) }, [])
+  const providerModels = useActiveProviderModels(runtime.engine, open)
   // 注入技能反馈 toast（复用 .proj-toast；自动消失）
   const [toast, setToast] = useState<string | null>(null)
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -113,20 +118,29 @@ export function ModelPill({
   const dyn = toUIModels(dynModels)
   const chips = ui.getRuntimeChips(slotsOf(runtime))
 
+  // 脸 chip 当前模型别名显示（dynModels 优先，其次别名配置）
+  const allModelOptions = ui.getModelOptions ? ui.getModelOptions(slotsOf(runtime), dyn, providerModels) : []
+  const faceLabelFromOptions = allModelOptions.find((m) => m.value === runtime.model)?.label
+  const faceDisplay = resolveModelDisplay(runtime.engine, runtime.model, {
+    providerLabel: providerModels?.find((pm) => pm.value === runtime.model)?.label,
+    officialLabel: faceLabelFromOptions,
+    modelAliases,
+  })
+
   return (
     <>
       <button
         ref={btnRef}
         className={`model-btn${open ? ' is-open' : ''}`}
         type="button"
-        aria-label={ui.getModelLabel(runtime.model, dyn)}
+        aria-label={faceDisplay.name}
         onClick={(e) => {
           e.stopPropagation()
           setOpen((v) => !v)
         }}
       >
         <span className="mb-text">
-          <span className="model-name">{ui.getModelLabel(runtime.model, dyn)}</span>
+          <span className="model-name">{faceDisplay.name}</span>
           <span className="mb-extra">
             {chips.map((chip) => (
               <span key={chip.key} className="mb-chip-wrap">
@@ -146,6 +160,8 @@ export function ModelPill({
             runtime={runtime}
             dispatch={dispatch}
             dynModels={dyn}
+            providerModels={providerModels}
+            modelAliases={modelAliases}
             commands={commands}
             onInsertCommand={onInsertCommand}
             onInjectSkill={() => { setOpen(false); setSkillOpen(true) }}
@@ -179,18 +195,20 @@ interface ModelPopContentProps {
   runtime: RuntimeState
   dispatch: React.Dispatch<RuntimeAction>
   dynModels?: UIModelOption[] | null
+  providerModels?: UIModelOption[]
+  modelAliases?: Record<string, Record<string, string>>
   commands?: SlashCommand[]
   onInsertCommand?: (name: string) => void
   onInjectSkill: () => void
   onClose: () => void
 }
 
-function ModelPopContent({ runtime, dispatch, dynModels, commands, onInsertCommand, onInjectSkill, onClose }: ModelPopContentProps) {
+function ModelPopContent({ runtime, dispatch, dynModels, providerModels, modelAliases = {}, commands, onInsertCommand, onInjectSkill, onClose }: ModelPopContentProps) {
   const ui = SLICES[runtime.engine].chatUIConfig
   const slots = slotsOf(runtime)
   const modeSegments = ui.getModeSelector(slots)
   const effort = ui.getEffortSection?.(slots) ?? null
-  const modelSection = ui.getModelSection(slots, dynModels)
+  const modelSection = ui.getModelSection(slots, dynModels, providerModels)
   // 命令区只对支持动态模型/命令的切片显示（claude）——slash commands 是 claude SDK 能力，由切片标志门控。
   const showCommands = !!ui.supportsDynamicModels
 
@@ -332,33 +350,44 @@ function ModelPopContent({ runtime, dispatch, dynModels, commands, onInsertComma
       <div className="model-group">
         <div className="model-group-h">{modelSection.groupLabel}</div>
         {modelSection.collapsed && !hasQuery ? (
-          <button
-            type="button"
-            className="model-item model-item-2l model-collapsed"
-            data-model-toggle
-            aria-label="选择模型"
-          >
-            <span className="mi-text">
-              <span className="mi-title">{modelSection.current?.label}</span>
-              {modelSection.current?.description && <span className="mi-desc">{modelSection.current.description}</span>}
-            </span>
-            <span className="mi-caret">{CARET_SVG}</span>
-          </button>
+          (() => {
+            const cur = modelSection.current
+            const cd = cur ? resolveModelDisplay(runtime.engine, cur.value, { providerLabel: providerModels?.find((pm) => pm.value === cur.value)?.label, officialLabel: cur.label, modelAliases }) : null
+            return (
+              <button
+                type="button"
+                className="model-item model-item-2l model-collapsed"
+                data-model-toggle
+                aria-label="选择模型"
+              >
+                <span className="mi-text">
+                  <span className="mi-title">{cd?.name ?? cur?.label}</span>
+                  {cd?.showId && <span className="model-id">{cd.id}</span>}
+                  {cur?.description && <span className="mi-desc">{cur.description}</span>}
+                </span>
+                <span className="mi-caret">{CARET_SVG}</span>
+              </button>
+            )
+          })()
         ) : (
-          (hasQuery ? filteredModels : modelSection.list).map((m) => (
-            <button
-              key={m.value}
-              type="button"
-              className={`model-item${m.description ? ' model-item-2l' : ''}${m.value === runtime.model ? ' is-active' : ''}`}
-              data-model={m.value}
-            >
-              <span className="mi-text">
-                <span className="mi-title">{m.label}</span>
-                {m.description && <span className="mi-desc">{m.description}</span>}
-              </span>
-              <span className="mk">✓</span>
-            </button>
-          ))
+          (hasQuery ? filteredModels : modelSection.list).map((m) => {
+            const d = resolveModelDisplay(runtime.engine, m.value, { providerLabel: providerModels?.find((pm) => pm.value === m.value)?.label, officialLabel: m.label, modelAliases })
+            return (
+              <button
+                key={m.value}
+                type="button"
+                className={`model-item${(m.description || d.showId) ? ' model-item-2l' : ''}${m.value === runtime.model ? ' is-active' : ''}`}
+                data-model={m.value}
+              >
+                <span className="mi-text">
+                  <span className="mi-title">{d.name}</span>
+                  {d.showId && <span className="model-id">{d.id}</span>}
+                  {m.description && <span className="mi-desc">{m.description}</span>}
+                </span>
+                <span className="mk">✓</span>
+              </button>
+            )
+          })
         )}
       </div>
       )}
@@ -368,6 +397,9 @@ function ModelPopContent({ runtime, dispatch, dynModels, commands, onInsertComma
           rect={flyoutRect}
           models={modelSection.list}
           current={runtime.model}
+          engine={runtime.engine}
+          providerModels={providerModels}
+          modelAliases={modelAliases}
           onPick={(value) => {
             dispatch({ type: 'SET_MODEL', model: value })
             setFlyoutRect(null)
@@ -417,11 +449,14 @@ interface ModelFlyoutProps {
   rect: DOMRect
   models: UIModelOption[]
   current: string
+  engine: Engine
+  providerModels?: UIModelOption[]
+  modelAliases?: Record<string, Record<string, string>>
   onPick: (value: string) => void
   onOutside: () => void
 }
 
-function ModelFlyout({ rect, models, current, onPick, onOutside }: ModelFlyoutProps) {
+function ModelFlyout({ rect, models, current, engine, providerModels, modelAliases = {}, onPick, onOutside }: ModelFlyoutProps) {
   const ref = useRef<HTMLDivElement>(null)
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null)
 
@@ -462,20 +497,24 @@ function ModelFlyout({ rect, models, current, onPick, onOutside }: ModelFlyoutPr
         onPick(item.getAttribute('data-model')!)
       }}
     >
-      {models.map((m) => (
-        <button
-          key={m.value}
-          type="button"
-          className={`model-item model-item-2l${m.value === current ? ' is-active' : ''}`}
-          data-model={m.value}
-        >
-          <span className="mi-text">
-            <span className="mi-title">{m.label}</span>
-            {m.description && <span className="mi-desc">{m.description}</span>}
-          </span>
-          <span className="mk">✓</span>
-        </button>
-      ))}
+      {models.map((m) => {
+        const d = resolveModelDisplay(engine, m.value, { providerLabel: providerModels?.find((pm) => pm.value === m.value)?.label, officialLabel: m.label, modelAliases })
+        return (
+          <button
+            key={m.value}
+            type="button"
+            className={`model-item model-item-2l${m.value === current ? ' is-active' : ''}`}
+            data-model={m.value}
+          >
+            <span className="mi-text">
+              <span className="mi-title">{d.name}</span>
+              {d.showId && <span className="model-id">{d.id}</span>}
+              {m.description && <span className="mi-desc">{m.description}</span>}
+            </span>
+            <span className="mk">✓</span>
+          </button>
+        )
+      })}
     </div>,
     document.body,
   )

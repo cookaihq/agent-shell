@@ -6,12 +6,14 @@ interface SessionDbRow {
   id: string; project_id: string; engine: string; model: string; title: string
   pinned: number; status: string; resumable_id: string | null
   permission_mode: string | null; effort: string | null
+  codex_sandbox: string | null; codex_approval: string | null
   claude_code_version: string | null; sdk_version: string | null; created_at: number
 }
 const toRow = (r: SessionDbRow): SessionRow => ({
   id: r.id, projectId: r.project_id, engine: r.engine as SessionRow['engine'], model: r.model,
   title: r.title, pinned: r.pinned === 1, status: r.status as SessionStatus,
   resumableId: r.resumable_id, permissionMode: r.permission_mode ?? null, effort: r.effort ?? null,
+  sandbox: r.codex_sandbox ?? null, approval: r.codex_approval ?? null,
   claudeCodeVersion: r.claude_code_version ?? null, sdkVersion: r.sdk_version ?? null,
   createdAt: r.created_at,
 })
@@ -21,19 +23,22 @@ export function createSession(db: Database.Database, input: CreateSessionInput):
     id: randomUUID(), projectId: input.projectId, engine: input.engine, model: input.model,
     title: input.title ?? '新会话', pinned: false, status: 'idle', resumableId: null,
     permissionMode: input.permissionMode ?? null, effort: input.effort ?? null,
+    sandbox: input.sandbox ?? null, approval: input.approval ?? null,
     claudeCodeVersion: null, sdkVersion: null, createdAt: Date.now(),
   }
   db.prepare(
-    'INSERT INTO sessions (id, project_id, engine, model, title, pinned, status, resumable_id, permission_mode, effort, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-  ).run(row.id, row.projectId, row.engine, row.model, row.title, row.pinned ? 1 : 0, row.status, row.resumableId, row.permissionMode, row.effort, row.createdAt)
+    'INSERT INTO sessions (id, project_id, engine, model, title, pinned, status, resumable_id, permission_mode, effort, codex_sandbox, codex_approval, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+  ).run(row.id, row.projectId, row.engine, row.model, row.title, row.pinned ? 1 : 0, row.status, row.resumableId, row.permissionMode, row.effort, row.sandbox, row.approval, row.createdAt)
   return row
 }
 
 /** 持久化会话级运行时档位（Issue 13/29）：只更新传入的字段，null/undefined 不动。 */
-export function setSessionRuntime(db: Database.Database, id: string, cfg: { permissionMode?: string; effort?: string; model?: string }): void {
+export function setSessionRuntime(db: Database.Database, id: string, cfg: { permissionMode?: string; effort?: string; model?: string; sandbox?: string; approval?: string }): void {
   if (cfg.permissionMode !== undefined) db.prepare('UPDATE sessions SET permission_mode = ? WHERE id = ?').run(cfg.permissionMode, id)
   if (cfg.effort !== undefined) db.prepare('UPDATE sessions SET effort = ? WHERE id = ?').run(cfg.effort, id)
   if (cfg.model !== undefined) db.prepare('UPDATE sessions SET model = ? WHERE id = ?').run(cfg.model, id)
+  if (cfg.sandbox !== undefined) db.prepare('UPDATE sessions SET codex_sandbox = ? WHERE id = ?').run(cfg.sandbox, id)
+  if (cfg.approval !== undefined) db.prepare('UPDATE sessions SET codex_approval = ? WHERE id = ?').run(cfg.approval, id)
 }
 
 export function getSession(db: Database.Database, id: string): SessionRow | undefined {
@@ -61,6 +66,14 @@ export function setSessionPinned(db: Database.Database, id: string, pinned: bool
 
 export function setSessionTitle(db: Database.Database, id: string, title: string): void {
   db.prepare('UPDATE sessions SET title = ? WHERE id = ?').run(title, id)
+}
+
+/** 变身：同时更新 engine+model，并将引擎专属档案（permission_mode/effort/codex_sandbox/codex_approval）清空为 NULL，
+ *  消除跨引擎非法状态（Part B T5a）。 */
+export function changeSessionEngine(db: Database.Database, id: string, engine: SessionRow['engine'], model: string): void {
+  db.prepare(
+    'UPDATE sessions SET engine = ?, model = ?, permission_mode = NULL, effort = NULL, codex_sandbox = NULL, codex_approval = NULL WHERE id = ?',
+  ).run(engine, model, id)
 }
 
 export function setSessionVersions(db: Database.Database, id: string, v: { claudeCodeVersion?: string; sdkVersion?: string }): void {

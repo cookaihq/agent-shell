@@ -28,7 +28,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { AgentShellBridge, Engine } from '@agent-shell/contracts'
+import type { AgentShellBridge, EditorEntry, Engine } from '@agent-shell/contracts'
 import { api, ApiError } from '../api/client'
 import { useSplitDrag } from '../hooks/useSplitDrag'
 import { useFsWatch } from '../hooks/useFsWatch'
@@ -49,6 +49,9 @@ const INTERNAL_DRAG_MIME = 'application/x-agent-shell-paths'
 function getBridge(): AgentShellBridge | undefined {
   return (globalThis as { agentShell?: AgentShellBridge }).agentShell
 }
+
+// 编辑器检测结果 app 运行期缓存：装没装与项目无关，切项目 tab 不重测；重启 app 才重测。
+let editorsCache: EditorEntry[] | null = null
 
 // 从拖放事件取一组源磁盘绝对路径。Electron 32+ 已移除 File.path，统一经 preload 的 webUtils.getPathForFile。
 // 浏览器/dev（无 agentShell 桥）下返回空数组 → 不导入（拖放是桌面壳能力）。
@@ -94,6 +97,22 @@ interface FileWorkspaceProps {
 
 export function FileWorkspace({ projectId, onActiveFile, openCmd, openFileReq, engine = 'claude', sliceState, blocks, showAgentsReq, onOpenCommand, projectRoot }: FileWorkspaceProps) {
   const [tree, setTree] = useState<FileNode[]>([])
+  const [editors, setEditors] = useState<EditorEntry[]>(editorsCache ?? [])
+  const requestEditors = async () => {
+    if (editorsCache) { setEditors(editorsCache); return }
+    const bridge = getBridge()
+    if (!bridge?.detectEditors) return
+    try {
+      const list = await bridge.detectEditors()
+      editorsCache = list
+      setEditors(list)
+    } catch { /* 静默：检测失败则不显示编辑器项 */ }
+  }
+  const openInEditor = (id: string) => {
+    const bridge = getBridge()
+    if (!bridge?.openInEditor || !projectRoot) return
+    void bridge.openInEditor(id, projectRoot)
+  }
   // 当前激活的 key：'files' 浏览器 / 文件路径 / 'cmd:<id>' 命令 tab
   const [activeFileKey, setActiveFileKey] = useState<string>('files')
   // 已打开的文件 tab 列表（去重有序）
@@ -492,6 +511,9 @@ export function FileWorkspace({ projectId, onActiveFile, openCmd, openFileReq, e
               rename={renaming?.source === 'tree' ? { path: renaming.path, submit: doRename, cancel: () => setRenaming(null) } : undefined}
               createReq={createReq ?? undefined}
               dnd={{ mime: INTERNAL_DRAG_MIME, begin: beginInternalDrag, canDrop: canDropInto, drop: dropMoveInto }}
+              editors={getBridge() ? editors : undefined}
+              onRequestEditors={requestEditors}
+              onOpenInEditor={openInEditor}
             />
             {/* 内部分隔条：拖动调整目录树 / 文件列表宽度 */}
             <div className="fb-handle" {...fbHandle} />

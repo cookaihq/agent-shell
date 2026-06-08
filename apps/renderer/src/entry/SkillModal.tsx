@@ -5,6 +5,7 @@ import type { LibrarySkill } from '../api/types'
 import { IconClose } from '../ui/icons'
 import { Button } from '../ui/Button'
 import { IconButton } from '../ui/IconButton'
+import { useSettings } from '../settings/SettingsContext'
 
 interface SkillModalProps {
   initialSelected: string[]
@@ -16,6 +17,7 @@ export function SkillModal({ initialSelected, onClose, onDone }: SkillModalProps
   const [q, setQ] = useState('')
   const [sel, setSel] = useState<Set<string>>(() => new Set(initialSelected))
   const [skills, setSkills] = useState<LibrarySkill[]>([])
+  const { openSettings } = useSettings()
 
   useEffect(() => {
     api.listSkillLibrary().then(r => setSkills(r.skills)).catch(() => setSkills([]))
@@ -27,10 +29,18 @@ export function SkillModal({ initialSelected, onClose, onDone }: SkillModalProps
     return () => document.removeEventListener('keydown', h)
   }, [onClose])
 
-  const rows = skills.filter((s) => {
-    const k = q.trim().toLowerCase()
-    return !k || s.name.toLowerCase().includes(k) || s.desc.toLowerCase().includes(k)
-  })
+  const isBuiltin = (s: LibrarySkill) => s.sourceId === 'builtin'
+  const rows = skills
+    .filter((s) => {
+      const k = q.trim().toLowerCase()
+      return !k || s.name.toLowerCase().includes(k) || s.desc.toLowerCase().includes(k)
+    })
+    // 内置技能（始终注入的基础设施）沉到列表最后；非内置保持原顺序（sort 稳定）
+    .sort((a, b) => Number(isBuiltin(a)) - Number(isBuiltin(b)))
+
+  // 内置不计入「已选」口径：与首页徽标一致，只数用户选的非内置技能
+  const builtinNames = new Set(skills.filter(isBuiltin).map((s) => s.effectiveName))
+  const selCount = [...sel].filter((n) => !builtinNames.has(n)).length
 
   const toggle = (effectiveName: string) => setSel((prev) => {
     const next = new Set(prev)
@@ -78,15 +88,30 @@ export function SkillModal({ initialSelected, onClose, onDone }: SkillModalProps
                       ⚠ {s.globalIn.map(e => e === 'claude' ? 'Claude' : 'Codex').join('·')} 全局
                     </span>
                   )}
+                  {s.needsConfig && (
+                    <span className="cfg-badge cfg-badge--need">需配置</span>
+                  )}
+                  {isBuiltin(s) && (
+                    <span className="cfg-badge cfg-badge--builtin" title="内置技能，始终注入">内置</span>
+                  )}
                 </span>
                 <span className="si-desc">{s.desc}</span>
               </span>
+              {s.needsConfig && (
+                <span
+                  className="cfg-goconf"
+                  title="去 集成·技能 绑定密钥"
+                  onClick={(e) => { e.stopPropagation(); openSettings('secrets'); onClose() }}
+                >
+                  去配置
+                </span>
+              )}
               <span className="si-check">✓</span>
             </button>
           )) : <div className="sm-empty">没有匹配的技能</div>}
         </div>
         <div className="sm-foot">
-          <span className="sm-count">{sel.size ? `已选 ${sel.size} 个` : '未选择'}</span>
+          <span className="sm-count">{selCount ? `已选 ${selCount} 个` : '未选择'}</span>
           <span className="sm-sp" />
           <Button variant="primary" onClick={() => onDone([...sel])}>完成</Button>
         </div>

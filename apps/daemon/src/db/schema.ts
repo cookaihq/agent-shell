@@ -3,10 +3,11 @@ import type Database from 'better-sqlite3'
 /** V1 schema（v1-spec §3）：projects → sessions → usage。对话记录统一写 transcript JSONL，messages 表已移除。Provider 延后，无 provider_id/providers。 */
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS projects (
-  id          TEXT PRIMARY KEY,
-  name        TEXT NOT NULL,
-  path        TEXT NOT NULL,
-  created_at  INTEGER NOT NULL
+  id             TEXT PRIMARY KEY,
+  name           TEXT NOT NULL,
+  path           TEXT NOT NULL,
+  selected_agent TEXT,
+  created_at     INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS sessions (
   id              TEXT PRIMARY KEY,
@@ -19,6 +20,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   resumable_id    TEXT,
   permission_mode TEXT,
   effort          TEXT,
+  codex_sandbox   TEXT,
+  codex_approval  TEXT,
   created_at      INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
@@ -32,16 +35,8 @@ CREATE TABLE IF NOT EXISTS usage (
   created_at     INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_usage_session ON usage(session_id);
-CREATE TABLE IF NOT EXISTS automations (
-  id          TEXT PRIMARY KEY,
-  name        TEXT NOT NULL,
-  prompt      TEXT NOT NULL,
-  engine      TEXT NOT NULL,
-  model       TEXT NOT NULL,
-  permission  TEXT NOT NULL,
-  categories  TEXT NOT NULL DEFAULT '[]',
-  schedule    TEXT NOT NULL,
-  target      TEXT NOT NULL,
+CREATE TABLE IF NOT EXISTS automation_runtime (
+  id          TEXT PRIMARY KEY,      -- = 库内文件夹名（稳定 join key）
   enabled     INTEGER NOT NULL DEFAULT 1,
   next_run_at INTEGER,
   created_at  INTEGER NOT NULL,
@@ -75,6 +70,11 @@ export function initSchema(db: Database.Database): void {
   // 运行时配置持久化（Issue 13/29）：会话级权限档 / 思考强度。老库无此列时补上。
   ensureColumn(db, 'sessions', 'permission_mode', 'permission_mode TEXT')
   ensureColumn(db, 'sessions', 'effort', 'effort TEXT')
+  // codex 两轴权限持久化（Part A P1）：会话级沙箱档 / 审批策略。
+  ensureColumn(db, 'sessions', 'codex_sandbox', 'codex_sandbox TEXT')
+  ensureColumn(db, 'sessions', 'codex_approval', 'codex_approval TEXT')
   ensureColumn(db, 'sessions', 'claude_code_version', 'claude_code_version TEXT')
   ensureColumn(db, 'sessions', 'sdk_version', 'sdk_version TEXT')
+  // 项目级持久化选中 Agent（Part B T1）：新建库已含此列，老库补列。
+  ensureColumn(db, 'projects', 'selected_agent', 'selected_agent TEXT')
 }

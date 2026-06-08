@@ -13,15 +13,16 @@ describe('sanitizeEnv', () => {
     expect(env.PATH).toBe('/usr/bin')   // 其它变量原样保留
   })
 
-  it('有自定义 base_url → 写回 base URL 与 key（BYOK）', () => {
+  it('有自定义 base_url → 写回 base URL 与 key（Provider 直连）', () => {
     const env = sanitizeEnv(claudeAuth, { PATH: '/usr/bin' }, { baseUrl: 'https://relay', apiKey: 'sk-byok' })
     expect(env.ANTHROPIC_BASE_URL).toBe('https://relay')
     expect(env.ANTHROPIC_API_KEY).toBe('sk-byok')
   })
 
-  it('给了 key 但没 base_url → key 仍被剥除（铁律：有 base_url 才留 key）', () => {
+  it('给了 key 但没 base_url → 仍注入 key、不写 base_url（官网来源：x-api-key 走官方端点）', () => {
     const env = sanitizeEnv(claudeAuth, { ANTHROPIC_API_KEY: 'sk-inherited' }, { apiKey: 'sk-byok' })
-    expect(env.ANTHROPIC_API_KEY).toBeUndefined()
+    expect(env.ANTHROPIC_API_KEY).toBe('sk-byok')
+    expect(env.ANTHROPIC_BASE_URL).toBeUndefined()
   })
 
   it('不修改传入的 baseEnv（返回新对象）', () => {
@@ -55,5 +56,17 @@ describe('sanitizeEnv', () => {
     const env = sanitizeEnv(noAlt, {}, { baseUrl: 'https://relay', apiKey: 'sk-1', keyEnv: 'auth_token' })
     expect(env.ANTHROPIC_API_KEY).toBe('sk-1')
     expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined()
+  })
+})
+
+describe('sanitizeEnv · extraEnv（技能密钥）', () => {
+  const auth = { apiKeyEnv: 'ANTHROPIC_API_KEY', baseUrlEnv: 'ANTHROPIC_BASE_URL', altKeyEnv: 'ANTHROPIC_AUTH_TOKEN' }
+  it('extraEnv 注入技能 env 变量', () => {
+    const env = sanitizeEnv(auth, {}, undefined, { GAODE_API_KEY: 'v1' })
+    expect(env.GAODE_API_KEY).toBe('v1')
+  })
+  it('引擎 auth 变量优先于同名技能 env（auth 完整性）', () => {
+    const env = sanitizeEnv(auth, {}, { baseUrl: 'https://r', apiKey: 'sk-real', keyEnv: 'api_key' }, { ANTHROPIC_API_KEY: 'skill-set' })
+    expect(env.ANTHROPIC_API_KEY).toBe('sk-real')
   })
 })

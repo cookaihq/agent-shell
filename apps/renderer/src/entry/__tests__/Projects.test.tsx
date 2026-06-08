@@ -5,9 +5,9 @@ import { Projects } from '../Projects'
 import type { ProjectDTO } from '../../api/types'
 
 const projs: ProjectDTO[] = [
-  { id: 'p1', name: 'seed-pitch-deck', path: '/x', createdAt: 3000, status: 'completed', engine: 'claude' },
-  { id: 'p2', name: 'api-gateway', path: '/y', createdAt: 1000, status: 'idle', engine: 'codex' },
-  { id: 'p3', name: 'zeta-tool', path: '/z', createdAt: 2000, status: 'running', engine: 'claude' },
+  { id: 'p1', name: 'seed-pitch-deck', path: '/x', createdAt: 3000, status: 'completed', engine: 'claude', selectedAgent: null },
+  { id: 'p2', name: 'api-gateway', path: '/y', createdAt: 1000, status: 'idle', engine: 'codex', selectedAgent: null },
+  { id: 'p3', name: 'zeta-tool', path: '/z', createdAt: 2000, status: 'running', engine: 'claude', selectedAgent: null },
 ]
 
 function setup(over: Partial<Parameters<typeof Projects>[0]> = {}) {

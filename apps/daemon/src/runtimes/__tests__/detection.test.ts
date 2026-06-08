@@ -2,12 +2,13 @@ import { describe, it, expect } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { detectBinary, detectEngines, type DetectionDeps } from '../detection'
+import { detectBinary, detectEngines, executableCandidates, type DetectionDeps } from '../detection'
 
 // 构造一个用内存"文件系统"的 deps：existing 是可执行文件全路径集合。
 // runnable（缺省=全部 existing）才被 probeVersion 视为"能跑出版本"，用于测「挑能跑的」逻辑。
 function deps(opts: {
-  pathDirs?: string[]; existing?: string[]; home?: string; nvmNodes?: string[]; runnable?: string[]
+  pathDirs?: string[]; existing?: string[]; home?: string; nvmNodes?: string[]; runnable?: string[]; platform?: NodeJS.Platform
+  bundledCodex?: string | null; bundledClaude?: string | null
 }): DetectionDeps {
   const existing = new Set(opts.existing ?? [])
   const runnable = new Set(opts.runnable ?? opts.existing ?? [])
@@ -15,9 +16,13 @@ function deps(opts: {
   return {
     env: { PATH: (opts.pathDirs ?? []).join(':') },
     home: opts.home ?? '/Users/me',
+    platform: opts.platform ?? 'linux',
     fileExists: (p) => existing.has(p),
     listDir: (p) => (p.endsWith('/.nvm/versions/node') ? nvmNodes : []),
     probeVersion: (p) => (runnable.has(p) ? '1.0.0' : null),
+    // 自带版 claude/codex：detectEngines 据此报随包二进制路径（不扫系统）；缺省=未解析到。
+    resolveBundledCodex: () => (opts.bundledCodex ?? null),
+    resolveBundledClaude: () => (opts.bundledClaude ?? null),
   }
 }
 
@@ -107,9 +112,13 @@ describe('detectBinary 在多安装间挑「真能跑出版本」的那个', () 
 })
 
 describe('detectEngines', () => {
-  it('分别报告 claude/codex 的定位结果', () => {
-    const d = deps({ pathDirs: ['/usr/bin'], existing: ['/usr/bin/claude'] })
-    expect(detectEngines(d)).toEqual({ claude: '/usr/bin/claude', codex: null })
+  it('claude/codex 均报自带版随包二进制路径（都不扫系统 PATH）', () => {
+    const d = deps({ pathDirs: ['/usr/bin'], existing: ['/usr/bin/claude', '/usr/bin/codex'], bundledClaude: '/bundled/claude', bundledCodex: '/bundled/codex' })
+    expect(detectEngines(d)).toEqual({ claude: '/bundled/claude', codex: '/bundled/codex' })
+  })
+  it('自带版解析不到时报 null（不回落系统版）——即便系统 PATH 里装着 claude/codex', () => {
+    const d = deps({ pathDirs: ['/usr/bin'], existing: ['/usr/bin/claude', '/usr/bin/codex'], bundledClaude: null, bundledCodex: null })
+    expect(detectEngines(d)).toEqual({ claude: null, codex: null })
   })
 })
 
@@ -130,5 +139,51 @@ describe('detectBinary 真实文件系统谓词（仅匹配可执行文件，非
       process.env.PATH = prevPath
       fs.rmSync(tmp, { recursive: true, force: true })
     }
+  })
+})
+
+describe('detectBinary — win32 按 PATHEXT 补扩展名（修 winget/npm 装的 .exe/.cmd 识别）', () => {
+  it('裸名 stat 不到、命中同目录的 claude.exe（正是线上「未检测到」的场景）', () => {
+    const dir = 'C:\\Users\\me\\AppData\\Local\\Microsoft\\WinGet\\Links'
+    const exe = path.win32.join(dir, 'claude.exe')   // winget 实际装的文件；裸 'claude' 不存在。用 win32 拼接，使本测试在任意 host（mac/CI）都成立
+    const d: DetectionDeps = {
+      env: { PATH: dir, PATHEXT: '.COM;.EXE;.CMD' },
+      home: 'C:\\Users\\me',
+      platform: 'win32',
+      fileExists: (p) => p === exe,
+      listDir: () => [],
+      probeVersion: (p) => (p === exe ? '2.1.0' : null),
+      resolveBundledCodex: () => null,
+      resolveBundledClaude: () => null,
+    }
+    expect(detectBinary('claude', d)).toBe(exe)
+  })
+
+  it('同场景在 posix 下只试裸名 → 找不到（佐证补扩展名是 win32 专属修复）', () => {
+    const dir = '/usr/local/bin'
+    const exe = path.join(dir, 'claude.exe')
+    const d: DetectionDeps = {
+      env: { PATH: dir },
+      home: '/Users/me',
+      platform: 'linux',
+      fileExists: (p) => p === exe,
+      listDir: () => [],
+      probeVersion: (p) => (p === exe ? '2.1.0' : null),
+      resolveBundledCodex: () => null,
+      resolveBundledClaude: () => null,
+    }
+    expect(detectBinary('claude', d)).toBeNull()
+  })
+})
+
+describe('executableCandidates', () => {
+  it('win32 按 PATHEXT 生成「裸名 + 各扩展名（小写）」', () => {
+    expect(executableCandidates('claude', 'win32', '.EXE;.CMD')).toEqual(['claude', 'claude.exe', 'claude.cmd'])
+  })
+  it('win32 缺 PATHEXT 用默认集', () => {
+    expect(executableCandidates('codex', 'win32', undefined)).toEqual(['codex', 'codex.com', 'codex.exe', 'codex.bat', 'codex.cmd'])
+  })
+  it('posix 只用裸名（忽略 PATHEXT）', () => {
+    expect(executableCandidates('claude', 'linux', '.EXE;.CMD')).toEqual(['claude'])
   })
 })

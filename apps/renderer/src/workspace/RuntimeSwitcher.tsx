@@ -16,6 +16,8 @@ import type { Engine } from '../api/types'
 import type { DynModel } from './ModelPill'
 import { EngIcon } from '../ui/icons'
 import { useSettings } from '../settings/SettingsContext'
+import { useActiveProviderModels } from './useActiveProviderModels'
+import { resolveModelDisplay } from './modelDisplay'
 
 // 代理 icon 背景色（按 engine 取；中立映射，非分支逻辑）
 const AGENT_ICON_BG: Record<string, string> = {
@@ -29,7 +31,7 @@ const AGENTS: { engine: Engine; name: string }[] = (Object.keys(SLICES) as Engin
   name: AGENT_LABEL[engine] ?? engine,
 }))
 
-export function RuntimeSwitcher({ sessionId }: { sessionId?: string } = {}) {
+export function RuntimeSwitcher({ sessionId, onAgentSwitch }: { sessionId?: string; onAgentSwitch?: (engine: Engine) => void } = {}) {
   const { runtime, dispatch } = useRuntime()
   const { openSettings } = useSettings()
   const [open, setOpen] = useState(false)
@@ -63,8 +65,20 @@ export function RuntimeSwitcher({ sessionId }: { sessionId?: string } = {}) {
     setOpen(prev => !prev)
   }
 
+  const providerModels = useActiveProviderModels(runtime.engine, true)
   const dyn = dynModels ? dynModels.map((m) => ({ value: m.value, label: m.displayName, description: m.description })) : null
-  const modelList = ui.getModelOptions(slotsOf(runtime), dyn)
+  const modelList = ui.getModelOptions(slotsOf(runtime), dyn, providerModels)
+
+  const [modelAliases, setModelAliases] = useState<Record<string, Record<string, string>>>({})
+  useEffect(() => { api.getConfig().then((c) => setModelAliases(c.modelAliases ?? {})).catch(() => {}) }, [])
+
+  // 脸 chip 当前模型显示：别名主行（d.name），空间紧凑不显 ID 副行
+  const currentModelOption = modelList.find((m) => m.value === runtime.model)
+  const currentModelDisplay = resolveModelDisplay(runtime.engine, runtime.model, {
+    providerLabel: providerModels.find((pm) => pm.value === runtime.model)?.label,
+    officialLabel: currentModelOption?.label,
+    modelAliases,
+  })
 
   return (
     <div className="inline-switcher" ref={wrapRef}>
@@ -86,7 +100,7 @@ export function RuntimeSwitcher({ sessionId }: { sessionId?: string } = {}) {
           <span className="isw-sep">·</span>
           <span className="isw-primary" id="chipPrimary">{AGENT_LABEL[runtime.engine] ?? runtime.engine}</span>
           <span className="isw-sep">·</span>
-          <span className="isw-model" id="chipModel">{ui.getModelLabel(runtime.model, dyn)}</span>
+          <span className="isw-model" id="chipModel">{currentModelDisplay.name}</span>
         </span>
         <span className="isw-chev">⌄</span>
       </button>
@@ -105,7 +119,10 @@ export function RuntimeSwitcher({ sessionId }: { sessionId?: string } = {}) {
                   data-agent={a.engine}
                   onClick={(e) => {
                     e.stopPropagation()
-                    dispatch({ type: 'SET_AGENT', agent: a.engine })
+                    // 会话区入口传 onAgentSwitch → 走会话级分流（未发送变身/已发送只设默认）；
+                    // home Topbar 无会话上下文、不传 → 回落 SET_AGENT（改 home runtime，Task 4 行为不变）。
+                    if (onAgentSwitch) onAgentSwitch(a.engine)
+                    else dispatch({ type: 'SET_AGENT', agent: a.engine })
                   }}
                 >
                   <EngIcon engine={a.engine} />
@@ -127,9 +144,10 @@ export function RuntimeSwitcher({ sessionId }: { sessionId?: string } = {}) {
                 dispatch({ type: 'SET_MODEL', model: e.target.value })
               }}
             >
-              {modelList.map(m => (
-                <option key={m.value} value={m.value}>{m.label}</option>
-              ))}
+              {modelList.map((m) => {
+                const d = resolveModelDisplay(runtime.engine, m.value, { providerLabel: providerModels.find((pm) => pm.value === m.value)?.label, officialLabel: m.label, modelAliases })
+                return <option key={m.value} value={m.value}>{d.showId ? `${d.name} · ${d.id}` : d.name}</option>
+              })}
             </select>
           </div>
         </div>

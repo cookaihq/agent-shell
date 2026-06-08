@@ -14,6 +14,10 @@ import { useReducer } from 'react'
 import type { ReactNode } from 'react'
 import { vi } from 'vitest'
 
+// SkillModal（注入选择器）现依赖 useSettings()（去配置链接）；workspace 单测不包 SettingsProvider，
+// mock useSettings 返回 no-op openSettings（运行时由 App.tsx 顶层 SettingsProvider 提供，此处镜像之）。
+vi.mock('../../settings/SettingsContext', async (orig) => ({ ...(await (orig() as Promise<object>)), useSettings: () => ({ openSettings: vi.fn() }) }))
+
 vi.mock('../../api/client', () => ({
   ApiError: class extends Error {},
   api: {
@@ -22,6 +26,8 @@ vi.mock('../../api/client', () => ({
     listSkillLibrary: vi.fn().mockResolvedValue({
       skills: [{ effectiveName: 'pdf', name: 'pdf', desc: 'PDF 工具', sourceId: 'a', sourceName: 'anthropics', globalIn: [] }],
     }),
+    listProviders: vi.fn().mockResolvedValue({ engines: { claude: { active: 'default', providers: [] }, codex: { active: 'default', providers: [] } } }),
+    getConfig: vi.fn().mockResolvedValue({ projectsDir: '', skillsDir: '', modelAliases: {} }),
   },
 }))
 

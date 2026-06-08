@@ -80,6 +80,25 @@ describe('sessions repo', () => {
     db.close()
   })
 
+  it('codex 两轴权限（Part A P3）：createSession 带 sandbox/approval 写入并读回；缺省为 null', () => {
+    const db = openDatabase(':memory:')
+    const a = createSession(db, { projectId: 'p1', engine: 'codex', model: 'gpt-5.5', sandbox: 'danger-full-access', approval: 'never' })
+    expect(getSession(db, a.id)).toMatchObject({ sandbox: 'danger-full-access', approval: 'never' })
+    const b = createSession(db, { projectId: 'p1', engine: 'codex', model: 'gpt-5.5' })
+    expect(getSession(db, b.id)).toMatchObject({ sandbox: null, approval: null })
+    db.close()
+  })
+
+  it('setSessionRuntime 持久化 codex sandbox/approval，重开回填（Part A P3）', () => {
+    const db = openDatabase(':memory:')
+    const s = createSession(db, { projectId: 'p1', engine: 'codex', model: 'gpt-5.5' })
+    setSessionRuntime(db, s.id, { sandbox: 'workspace-write' })
+    expect(getSession(db, s.id)).toMatchObject({ sandbox: 'workspace-write', approval: null })
+    setSessionRuntime(db, s.id, { approval: 'on-request' })
+    expect(getSession(db, s.id)).toMatchObject({ sandbox: 'workspace-write', approval: 'on-request' })
+    db.close()
+  })
+
   it('setSessionVersions 写入 + getSession 读回版本', () => {
     const db = openDatabase(':memory:')
     const s = createSession(db, { projectId: 'p1', engine: 'claude', model: 'opus' })
@@ -100,6 +119,24 @@ describe('sessions repo', () => {
     expect(cols).toContain('permission_mode')
     expect(cols).toContain('effort')
     expect(getSession(db, 'old1')).toMatchObject({ id: 'old1', permissionMode: null, effort: null })
+    db.close()
+  })
+
+  it('codex 两轴权限列（Part A P1）：新建库 sessions 表含 codex_sandbox/codex_approval', () => {
+    const db = openDatabase(':memory:')
+    const cols = (db.prepare('PRAGMA table_info(sessions)').all() as { name: string }[]).map((c) => c.name)
+    expect(cols).toContain('codex_sandbox')
+    expect(cols).toContain('codex_approval')
+    db.close()
+  })
+
+  it('迁移（Part A P1）：老库（无 codex 列）initSchema 幂等补 codex_sandbox/codex_approval', () => {
+    const db = new Database(':memory:')
+    db.exec(`CREATE TABLE sessions (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, engine TEXT NOT NULL, model TEXT NOT NULL, title TEXT NOT NULL, pinned INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'idle', resumable_id TEXT, created_at INTEGER NOT NULL)`)
+    initSchema(db)
+    const cols = (db.prepare('PRAGMA table_info(sessions)').all() as { name: string }[]).map((c) => c.name)
+    expect(cols).toContain('codex_sandbox')
+    expect(cols).toContain('codex_approval')
     db.close()
   })
 

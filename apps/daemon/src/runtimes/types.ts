@@ -21,12 +21,27 @@ export interface AuthStrategy {
   altKeyEnv?: string
 }
 
-/** BYOK / Provider 凭证（V1 不接 UI，但函数前向就绪）。 */
+/** Provider 直连凭证（claude 走 env-only：baseUrl→baseUrlEnv、apiKey→apiKeyEnv/altKeyEnv）。 */
 export interface ProviderCreds {
   baseUrl?: string
   apiKey?: string
   /** key 注入到哪个变量：api_key→apiKeyEnv，auth_token→altKeyEnv。省略=api_key。 */
   keyEnv?: 'api_key' | 'auth_token'
+  /** codex 专属扩展：codex 的 Provider 注入比 claude 更富（需 provider 名 + wire_api），走 app-server `-c` 启动覆盖而非纯 env。
+   *  存在时 codexAppServer 据此拼 `-c model_provider=<name> -c model_providers.<name>.{base_url,wire_api,env_key}`，
+   *  key 仍经 env（apiKeyEnv=OPENAI_API_KEY）注入。claude 路径忽略本字段（env-only 不变）。
+   *  ⚠️ 用了 codex 扩展时，baseUrl 由 `-c` 承载、**不再**写 OPENAI_BASE_URL（见 env.ts），避免双重配置冲突。 */
+  codex?: CodexProviderInject
+}
+
+/** codex 自定义 Provider 的 `-c` 注入所需字段（provider 名 + 上游协议）。 */
+export interface CodexProviderInject {
+  /** model_provider 名（= config.toml [model_providers.<name>]）。 */
+  providerName: string
+  /** 上游 base_url（拼进 `-c model_providers.<name>.base_url`）。 */
+  baseUrl: string
+  /** 上游协议：responses | chat（拼进 `-c model_providers.<name>.wire_api`）。 */
+  wireApi: 'chat' | 'responses'
 }
 
 /** 声明式引擎适配（MVP §2.2）。加引擎 = 加一个实现本接口的 def。 */

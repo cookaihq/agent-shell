@@ -12,6 +12,25 @@ describe('chatReducer', () => {
     expect(s.runStatus).toBe('idle')
   })
 
+  it('loadHistory 经 slice.rebuildSliceState(records) 还原 sliceState（P5c：codex 子代理重载还原）', () => {
+    // 切片提供 rebuildSliceState：从 records 重建私有态（这里用桩模拟 codex replay 结果）。
+    const slice = {
+      initSliceState: () => ({ subs: {}, waiting: {} }),
+      rebuildSliceState: (records: { type: string }[]) =>
+        records.some((r) => r.type === 'assistant_blocks') ? { subs: { 'sub-a': { threadId: 'sub-a' } }, waiting: {} } : { subs: {}, waiting: {} },
+    }
+    const records = [{ ts: 1, engine: 'codex', type: 'assistant_blocks', raw: {} }]
+    const s = chatReducer(initialChat(), { type: 'loadHistory', messages: [msg('user', 'hi')], running: false, slice, records: records as any })
+    // sliceState 用 rebuildSliceState 的产物种子（非空 initSliceState）
+    expect(s.sliceState).toEqual({ subs: { 'sub-a': { threadId: 'sub-a' } }, waiting: {} })
+  })
+
+  it('loadHistory 无 rebuildSliceState（如 claude）→ 回落 initSliceState', () => {
+    const slice = { initSliceState: () => ({ marker: 'init' }) }
+    const s = chatReducer(initialChat(), { type: 'loadHistory', messages: [], running: false, slice, records: [] as any })
+    expect(s.sliceState).toEqual({ marker: 'init' })
+  })
+
   it('optimisticUser 追加 user + running', () => {
     const s = chatReducer(initialChat(), { type: 'optimisticUser', text: 'q' })
     expect(s.messages.at(-1)).toMatchObject({ role: 'user' })

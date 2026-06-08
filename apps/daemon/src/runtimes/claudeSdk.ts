@@ -17,6 +17,7 @@ import { sanitizeEnv } from './env'
 import { channelDataDir } from '../paths'
 import type { AuthStrategy } from './types'
 import type { ImageInlineBlock } from '../session/imageInline'
+import { buildBuiltinToolsMcp } from './builtinTools'
 
 // Issue 1 诊断：SDK 把 spawn 真错误（errno/stderr）替换成「exists but failed to launch」泛化消息后再抛。
 // 这里把完整 error（所有自有属性 + cause 链 + stack）连同 cwd/PATH 上下文落盘，先拿到真因再决定修法，不臆测。
@@ -72,9 +73,25 @@ export interface ClaudeSdkTurnOpts {
   /** 引擎侧 resume 指针（session_id）。 */
   resumableId?: string
   baseEnv?: NodeJS.ProcessEnv
-  /** BYOK（V1 不传）。 */
+  /** Provider 直连（V1 不传）。 */
   creds?: { baseUrl?: string; apiKey?: string; keyEnv?: 'api_key' | 'auth_token' }
+  /** 本次 run 激活技能解析出的 env（技能密钥）；省略=不注入。 */
+  skillEnv?: Record<string, string>
+  /** 当前来源的代理意图（三态）：cli-login 继承 ambient / 受管直连删继承 / 受管有 url 注入。省略=不动代理变量。 */
+  proxy?: import('../proxy/resolveProxy').ActiveProxy
+  /** in-process as_install_skill 工具回调；省略=不挂该 MCP。 */
+  installSkill?: (req: import('@agent-shell/contracts').InstallSkillReq) => Promise<import('@agent-shell/contracts').InstallSkillResult>
+  /** in-process as_create_skill 工具回调；省略=不挂该 MCP（install 或 create 任一存在则挂）。 */
+  createSkill?: (req: import('@agent-shell/contracts').CreateSkillReq) => import('@agent-shell/contracts').CreateSkillResult | Promise<import('@agent-shell/contracts').CreateSkillResult>
+  /** in-process as_create_automation 工具回调（校验+落库，返回 content/isError）；省略=不挂该工具。 */
+  createAutomation?: (args: unknown) => Promise<{ content: { type: 'text'; text: string }[]; isError?: boolean }>
+  /** 注入 Claude 系统提示的追加段（preset append）；省略=不追加。本功能用来塞已装 CLI 工具上下文。 */
+  appendSystemPrompt?: string
+  /** in-process as_cli_* 工具的 cli-tools service 句柄；省略=不挂 cli 工具。 */
+  cli?: import('./builtinTools').CliMcpDeps
   enableFileCheckpointing?: boolean
+  /** 首轮 prompt 的文件检查点 uuid（宿主指定 → 与 transcript user_prompt 记录同源，支撑逐条 rewind）。省略则自铸。 */
+  checkpointId?: string
   outputFormat?: { type: 'json_schema'; schema: Record<string, unknown> }
   onEvent: (ev: AgentEvent) => void
   onTurnEnd?: (stopReason: string) => void
@@ -99,8 +116,9 @@ export interface ClaudeSdkHandle {
   /** 与 RunTurnHandle 同形（exitCode 对 SDK 恒 null）：generator 完成 / 中断后 resolve。 */
   done: Promise<{ exitCode: number | null }>
   interrupt: (graceMs?: number) => void
-  /** 往同一会话续投下一条 user 消息（streaming-input 排队）；可带 base64 image 块（续投轮内联图片）。 */
-  pushUser: (text: string, imageBlocks?: ImageInlineBlock[]) => void
+  /** 往同一会话续投下一条 user 消息（streaming-input 排队）；可带 base64 image 块（续投轮内联图片）。
+   *  checkpointId：宿主指定该条的文件检查点 uuid（与 transcript user_prompt 记录同源，逐条 rewind）；省略则自铸。 */
+  pushUser: (text: string, imageBlocks?: ImageInlineBlock[], checkpointId?: string) => void
   /** 结束输入流，让 query 跑完退出。 */
   endInput: () => void
   /** 解决一个挂起的授权/提问（renderer 回执）。未知 requestId 静默忽略（过期）。 */
@@ -152,13 +170,14 @@ class InputStream implements AsyncIterable<SDKUserMessage> {
 /** 起一轮（或续接）Claude SDK 会话：包 query() 常驻流，对外暴露与 CLI 适配器同形的 handle。 */
 export function runClaudeSdkTurn(opts: ClaudeSdkTurnOpts): ClaudeSdkHandle {
   const input = new InputStream()
-  // 每条 user prompt 宿主自分配 uuid → 即文件检查点 id。lastCheckpointId 记最近一条（rewindFiles 默认回退到此）。
+  // 每条 user prompt 一个 uuid → 即文件检查点 id。宿主可显式指定（与 transcript user_prompt 记录同源，逐条 rewind）；
+  // 省略则自铸。lastCheckpointId 记最近一条（rewindFiles 缺省回退到此）。
   const genUuid = opts.genCheckpointId ?? (() => randomUUID())
   let lastCheckpointId: string | undefined
-  const pushPrompt = (text: string, imageBlocks?: ImageInlineBlock[]): void => { const id = genUuid(); lastCheckpointId = id; input.push(text, id, imageBlocks) }
-  pushPrompt(opts.prompt, opts.images)
+  const pushPrompt = (text: string, imageBlocks?: ImageInlineBlock[], checkpointId?: string): void => { const id = checkpointId ?? genUuid(); lastCheckpointId = id; input.push(text, id, imageBlocks) }
+  pushPrompt(opts.prompt, opts.images, opts.checkpointId)
 
-  const env = sanitizeEnv(CLAUDE_AUTH, opts.baseEnv ?? process.env, opts.creds)
+  const env = sanitizeEnv(CLAUDE_AUTH, opts.baseEnv ?? process.env, opts.creds, opts.skillEnv, opts.proxy)
   const parse = createClaudeObjectParser()
 
   // ── 交互回路：每个挂起的 canUseTool 一个待决 Promise，requestId 索引 ──────────
@@ -211,8 +230,8 @@ export function runClaudeSdkTurn(opts: ClaudeSdkTurnOpts): ClaudeSdkHandle {
     // 置 true 才把子代理 assistant 文本+thinking 一并带 parent_tool_use_id 流出，供渲染内部时间线（spec D2，写死开）。
     forwardSubagentText: true,
     // 用 Claude Code 默认系统提示（含「工作目录」等动态段）：否则模型不知 cwd，会把文件写到家目录等乱猜路径。
-    // 对齐 CLI `claude -p` 的默认行为。
-    systemPrompt: { type: 'preset', preset: 'claude_code' },
+    // 对齐 CLI `claude -p` 的默认行为。append=追加已装 CLI 工具上下文（有则带，无则纯 preset）。
+    systemPrompt: { type: 'preset', preset: 'claude_code', ...(opts.appendSystemPrompt ? { append: opts.appendSystemPrompt } : {}) },
     canUseTool,
     permissionMode: opts.permissionMode ?? 'default',
     ...(opts.effort ? { effort: opts.effort as Options['effort'] } : {}),
@@ -221,6 +240,12 @@ export function runClaudeSdkTurn(opts: ClaudeSdkTurnOpts): ClaudeSdkHandle {
     ...(opts.resumableId ? { resume: opts.resumableId } : {}),
     ...(opts.enableFileCheckpointing ? { enableFileCheckpointing: true } : {}),
     ...(opts.outputFormat ? { outputFormat: opts.outputFormat } : {}),
+    ...((opts.installSkill || opts.createSkill || opts.cli || opts.createAutomation) ? { mcpServers: { 'agent-shell': buildBuiltinToolsMcp({
+      installSkill: opts.installSkill ?? (async () => ({ installed: [], already: [], conflicts: [] })),
+      createSkill: opts.createSkill ?? (() => ({ status: 'conflict' as const, name: '' })),
+      ...(opts.cli ? { cli: opts.cli } : {}),
+      ...(opts.createAutomation ? { createAutomation: opts.createAutomation } : {}),
+    }) } } : {}),
   }
 
   let resolveDone!: (v: { exitCode: number | null }) => void
@@ -326,7 +351,7 @@ export function runClaudeSdkTurn(opts: ClaudeSdkTurnOpts): ClaudeSdkHandle {
   return {
     done,
     interrupt: () => { interrupted = true; cancelAll(); emitTerminal('aborted'); if (!finished) void ready.then((qq) => qq.interrupt()).catch(() => {}) },
-    pushUser: (text: string, imageBlocks?: ImageInlineBlock[]) => { turnActive = true; resetIdle(); pushPrompt(text, imageBlocks) },   // 新一轮开始 → 重启看门狗 + 新检查点
+    pushUser: (text: string, imageBlocks?: ImageInlineBlock[], checkpointId?: string) => { turnActive = true; resetIdle(); pushPrompt(text, imageBlocks, checkpointId) },   // 新一轮开始 → 重启看门狗 + 新检查点
     endInput: () => input.end(),
     resolveDecision: (requestId, decision) => {
       if (decision.behavior === 'allow') {

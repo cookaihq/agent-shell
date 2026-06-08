@@ -1,6 +1,7 @@
 import { app, dialog, Notification, shell } from 'electron'
 import electronUpdater from 'electron-updater'
 import { CHECK_INTERVAL_MS, createVersionPromptGate, nextBackoffDelay } from './updater-policy'
+import type { UpdateState } from '@agent-shell/contracts'
 
 // mac 未签名不能自动更新（spec §10-#2）→ 引导用户到 Releases 页手动下载。
 // 公开镜像仓 Releases 页（与 apps/desktop/electron-builder.yml 的 publish 保持一致）。
@@ -18,7 +19,7 @@ const RELEASES_PAGE = 'https://github.com/cookaihq/agent-shell/releases/latest'
  * - Windows：自动下载 + 退出时安装（unsigned NSIS 可走通）。
  * - mac：未签名不能自动更新——检查到新版 → 弹框 → 开 Releases 页手动下载。
  */
-export function initUpdater(): void {
+export function initUpdater(opts: { onAvailable?: (s: UpdateState) => void } = {}): void {
   if (!app.isPackaged) return // dev 不查更新
 
   // 守卫之后才解构 autoUpdater：electron-updater 的该 getter 会急切构造 MacUpdater，
@@ -54,9 +55,10 @@ export function initUpdater(): void {
     failureStreak = 0
     scheduleNext(CHECK_INTERVAL_MS)
   })
-  autoUpdater.on('update-available', () => {
+  autoUpdater.on('update-available', (info) => {
     failureStreak = 0
     scheduleNext(CHECK_INTERVAL_MS)
+    opts.onAvailable?.({ version: info.version, releasesUrl: RELEASES_PAGE })
   })
 
   if (process.platform === 'darwin') {

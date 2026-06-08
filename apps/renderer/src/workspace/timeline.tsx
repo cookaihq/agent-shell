@@ -4,9 +4,12 @@
  * 外壳拥有时间线的「结构」：配对（buildResultMap）/嵌套（buildChildrenMap）/遍历（renderTimeline）/
  * 中立块→视图（blockInner）。这些只认中立字段（type/id/name/parentToolUseId/tool），不读 Agent 私有状态。
  *
- * 接缝（spec §6）：renderTimeline 遇 `Task` 工具块时**委托切片**（ctx.mountTask）渲染子代理节点——
- * 外壳不内联 SubagentNode/DelegateRow、不读 SubagentMeta。无 mountTask 的切片（codex）→ Task 块不特殊渲染。
- * `skipTranscript`（§9.5）的过滤也归切片：mountTask 返回 null → 该节点连同其子块（仅经此递归可达）一并消失。
+ * 接缝（spec §6）：renderTimeline 对**每个 tool_use 块**委托切片（ctx.mountTask）决定是否特殊渲染子代理节点——
+ * 外壳不内联 SubagentNode/DelegateRow、不读 SubagentMeta，也不硬编码任何 Agent 私有工具名（如 'Task'/'spawnAgent'）。
+ * 切片自行判定「这块归不归我管」，三态返回：
+ *   - 返回 ReactNode（非 null）→ 切片接管，外壳用它替代默认渲染；
+ *   - 返回 `null` → 切片接管且判定「该块连同子块一并消失」（如 claude skipTranscript §9.5 / codex 空子代理组）；
+ *   - 返回 `undefined`（或无 mountTask）→ 「不是我的块」，外壳按中立默认渲染（claude 非 Task 块 / codex 普通工具块）。
  */
 import type { ReactNode } from 'react'
 import type { Block } from '../api/types'
@@ -53,7 +56,7 @@ export interface SaCtx {
   childrenOf: Map<string, Block[]>
   /** 切片私有累计态（外壳不解释；mountTask 内部 cast 成自家形状如 SubagentMeta map）。 */
   sliceState?: unknown
-  /** 左·时间线 Task 块委托渲染（spec §6 接缝）：返回 null/undefined → 该节点不渲染（含 skipTranscript 过滤）。 */
+  /** 左·时间线 tool_use 块委托渲染（spec §6 接缝）：node→切片接管 / null→接管且消失 / undefined→不归我管，外壳默认渲染。 */
   mountTask?: (block: Extract<Block, { type: 'tool_use' }>, ctx: SaCtx) => ReactNode
   onOpenCommand?: (cmd: OpenCommand) => void
   onOpenDiff?: (d: DiffPayload) => void
@@ -121,12 +124,14 @@ export function renderTimeline(blocks: Block[], ctx: SaCtx): ReactNode[] {
   blocks.forEach((block, i) => {
     if (block.type === 'tool_result') return   // 已由配对 tool_use 渲染
     if (block.type === 'tool_use' && block.name === 'AskUserQuestion') return   // 由聊天内选择卡呈现
-    if (block.type === 'tool_use' && block.name === 'Task') {
-      // 接缝：Task 块整条委托切片渲染（SubagentNode / 委托行 / skipTranscript 过滤皆在切片内）。
-      // mountTask 返回 null/undefined（无切片贡献 = codex，或 skipTranscript 过滤）→ 该节点不进时间线。
-      const node = ctx.mountTask?.(block, ctx)
-      if (node) items.push(<TaskMount key={i}>{node}</TaskMount>)
-      return
+    if (block.type === 'tool_use' && ctx.mountTask) {
+      // 接缝：每个 tool_use 块都问一遍切片「归不归你管」（外壳不认 'Task'/'spawnAgent' 等私有工具名）。
+      // node→切片接管渲染；null→切片接管且判定该节点（连同子块）消失；undefined→不是切片的块，落到下方中立默认渲染。
+      const node = ctx.mountTask(block, ctx)
+      if (node !== undefined) {
+        if (node) items.push(<TaskMount key={i}>{node}</TaskMount>)
+        return
+      }
     }
     const r = blockInner(block, ctx)
     if (!r) return

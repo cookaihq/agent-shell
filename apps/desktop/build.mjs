@@ -21,10 +21,23 @@ await build({
   outfile: 'dist/daemon/entry.bundle.mjs',
   // external：原生模块 better-sqlite3 无法打包；@anthropic-ai/claude-agent-sdk 自带 218MB 平台二进制
   // （sdk.mjs 用 createRequire 锚定自身定位），打包后由 electron-builder 随 node_modules 纳入、运行时上溯解析。
-  external: ['better-sqlite3', '@anthropic-ai/claude-agent-sdk'],
+  // @openai/codex 同理（Part A P6 自带版）：196MB 平台原生二进制（optionalDependency），resolveBin.ts 用
+  // createRequire 锚定 @openai/codex 自身→平台子包 vendor/<triple>/bin/codex；保持 external、运行时从 node_modules 解析。
+  external: ['better-sqlite3', '@anthropic-ai/claude-agent-sdk', '@openai/codex'],
   // express 等 CJS 依赖被打进 ESM bundle 后，其内部 require 被 esbuild 改写成会抛错的
   // __require stub（"Dynamic require of X is not supported"）。注入真实 require：esbuild 的
   // __require 检测到 `typeof require !== "undefined"` 即委托给它，CJS 依赖的动态 require 恢复可用。
+  banner: { js: "import { createRequire as __cr } from 'node:module'; const require = __cr(import.meta.url);" },
+})
+
+// §10 create_automation（codex 侧）：把独立 stdio MCP server 打成自包含 bundle，与 main.cjs 同级 dist/。
+// codex app-server 经 -c mcp_servers.automation.args=["<abs>/automation-mcp.bundle.mjs"] spawn 它。
+// @modelcontextprotocol/sdk 纯 JS 内联；better-sqlite3 原生外部，运行时上溯 node_modules 解析。
+await build({
+  ...common,
+  entryPoints: ['../daemon/src/automation/mcp/automationMcpServer.ts'],
+  outfile: 'dist/automation-mcp.bundle.mjs',
+  external: ['better-sqlite3'],
   banner: { js: "import { createRequire as __cr } from 'node:module'; const require = __cr(import.meta.url);" },
 })
 
@@ -58,3 +71,14 @@ execSync('npm run build', { cwd: '../renderer', stdio: 'inherit' })
 // dev 与打包都从 main.cjs 同级 ./web serve renderer，无需 app.isPackaged 分支。
 rmSync('dist/web', { recursive: true, force: true })
 cpSync('../renderer/web-dist', 'dist/web', { recursive: true })
+
+// §9 builtin 源：把 daemon 侧的内置技能目录拷进 desktop dist/builtin-skills，
+// 与 dist/web 同级；main.cjs 在 dist/ 下，故 path.resolve(__dirname,'builtin-skills') 在
+// dev（electron dist/main.cjs）与打包（Resources/app/dist/main.cjs）下路径一致。
+rmSync('dist/builtin-skills', { recursive: true, force: true })
+cpSync('../daemon/src/builtin-skills', 'dist/builtin-skills', { recursive: true })
+
+// §16.3 builtin automation：把 daemon 侧的内置自动任务目录拷进 dist/builtin-automations，
+// 与 dist/builtin-skills 同级；main.cjs 经 path.resolve(__dirname,'builtin-automations') 定位（dev/打包一致）。
+rmSync('dist/builtin-automations', { recursive: true, force: true })
+cpSync('../daemon/src/builtin-automations', 'dist/builtin-automations', { recursive: true })

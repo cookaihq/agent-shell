@@ -38,7 +38,12 @@ function SoonCard({ title, desc }: { title: string; desc: string }) {
   )
 }
 
-export function Integrations() {
+interface IntegrationsProps {
+  // onInstallSeed：CLI 工具页点「安装」时预填首页 composer（透传给 CliTools）
+  onInstallSeed?: (text: string) => void
+}
+
+export function Integrations({ onInstallSeed }: IntegrationsProps) {
   const [tab, setTab] = useState<IntegTab>('skills')
   return (
     <>
@@ -55,7 +60,7 @@ export function Integrations() {
           </button>
         ))}
       </div>
-      {tab === 'skills' ? <SkillsSettings /> : tab === 'cli' ? <CliTools /> : <SoonCard {...SOON[tab as SoonTab]} />}
+      {tab === 'skills' ? <SkillsSettings /> : tab === 'cli' ? <CliTools onInstallSeed={onInstallSeed} /> : <SoonCard {...SOON[tab as SoonTab]} />}
     </>
   )
 }

@@ -84,4 +84,63 @@ describe('MentionPop', () => {
     expect(document.querySelector('.mention-main')).toBeTruthy()
     expect(document.querySelector('.mention-main b')).toBeTruthy()
   })
+
+  // Task 6.6.2：斜杠命令面板顶部吸附搜索框
+  describe('sticky 搜索框（is-cmd）', () => {
+    it('命令候选（is-cmd）+ query 时渲染 mention-search', () => {
+      render(
+        <MentionPop open={true} items={cmdItems} activeIndex={0} onChoose={vi.fn()} query="cl" />
+      )
+      const input = document.querySelector<HTMLInputElement>('.mention-search')
+      expect(input).toBeTruthy()
+      expect(input?.value).toBe('cl')
+      expect(input?.readOnly).toBe(true)
+    })
+
+    it('query 为空字符串时搜索框仍渲染（value=""）', () => {
+      render(
+        <MentionPop open={true} items={cmdItems} activeIndex={0} onChoose={vi.fn()} query="" />
+      )
+      const input = document.querySelector<HTMLInputElement>('.mention-search')
+      expect(input).toBeTruthy()
+      expect(input?.value).toBe('')
+    })
+
+    it('query 未传时搜索框 value 为空字符串（fallback）', () => {
+      render(
+        <MentionPop open={true} items={cmdItems} activeIndex={0} onChoose={vi.fn()} />
+      )
+      const input = document.querySelector<HTMLInputElement>('.mention-search')
+      expect(input).toBeTruthy()
+      expect(input?.value).toBe('')
+    })
+
+    it('@ 提及态（非 is-cmd）不渲染搜索框', () => {
+      render(
+        <MentionPop open={true} items={fileItems} activeIndex={0} onChoose={vi.fn()} query="read" />
+      )
+      expect(document.querySelector('.mention-search')).toBeNull()
+    })
+
+    it('搜索框 mouseDown 调用 onFocusComposer', () => {
+      const onFocusComposer = vi.fn()
+      render(
+        <MentionPop
+          open={true} items={cmdItems} activeIndex={0} onChoose={vi.fn()}
+          query="cl" onFocusComposer={onFocusComposer}
+        />
+      )
+      const input = document.querySelector<HTMLInputElement>('.mention-search')!
+      fireEvent.mouseDown(input)
+      expect(onFocusComposer).toHaveBeenCalledTimes(1)
+    })
+
+    it('搜索框 tabIndex=-1（不参与 Tab 键盘流）', () => {
+      render(
+        <MentionPop open={true} items={cmdItems} activeIndex={0} onChoose={vi.fn()} query="" />
+      )
+      const input = document.querySelector<HTMLInputElement>('.mention-search')
+      expect(input?.tabIndex).toBe(-1)
+    })
+  })
 })

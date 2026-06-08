@@ -46,6 +46,12 @@ export function readRecords(dir: string, sessionId: string): TranscriptRecord[] 
   return out
 }
 
+/** 判断会话是否已发送过消息（引擎中立）：只看 type === 'user_prompt'，不看 engine。
+ *  用于「变身守卫」：空会话可改引擎，已发送会话不可改（Part B T2 隔离铁律）。 */
+export function sessionHasMessages(dir: string, sessionId: string): boolean {
+  return readRecords(dir, sessionId).some((r) => r.type === 'user_prompt')
+}
+
 // §8：transcript 记录 → MessageDTO 的重建职责已整体下沉 renderer 各切片 historyService.rebuildBlocks
 // （claude 切片含 msg_id 提取、codex 切片仅共享骨架），daemon 不再保留 transcriptToMessages / TranscriptMessage。
 // collapseStreamingText 仍在本模块 re-export 供 onTurnEnd 落库前折叠（§13 勿丢），且共享自 contracts。

@@ -23,11 +23,22 @@ interface HomeProps {
   onViewAll: () => void
   skillCount: number
   onOpenSkillModal: () => void
+  // composerSeed：预填 composer 的文本（Integrations 点「安装」、自动化 agent-led 新建/编辑都走这条）；消费后由 AppNav 清空
+  composerSeed?: string
+  onSeedConsumed?: () => void
 }
 
-export function Home({ projects, onSend, onOpenProject, onViewAll, skillCount, onOpenSkillModal }: HomeProps) {
+export function Home({ projects, onSend, onOpenProject, onViewAll, skillCount, onOpenSkillModal, composerSeed, onSeedConsumed }: HomeProps) {
   const [text, setText] = useState('')
   const [staged, setStaged] = useState<HomeAttachment[]>([])
+
+  // 非空 seed 到达时填充输入框并通知 AppNav 清空种子（避免重渲染再次触发）
+  useEffect(() => {
+    if (composerSeed) {
+      setText(composerSeed)
+      onSeedConsumed?.()
+    }
+  }, [composerSeed, onSeedConsumed])
 
   const send = () => {
     const t = text.trim()

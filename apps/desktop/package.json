@@ -1,20 +1,21 @@
 {
   "name": "@agent-shell/desktop",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "main": "dist/main.cjs",
   "scripts": {
     "build": "node build.mjs",
-    "build:dev": "AGENT_SHELL_CHANNEL=dev node build.mjs",
-    "start": "ELECTRON_RUN_AS_NODE= electron dist/main.cjs",
+    "build:dev": "cross-env AGENT_SHELL_CHANNEL=dev node build.mjs",
+    "start": "node start.mjs",
     "pack:mac": "node build.mjs && electron-builder --mac --publish never",
-    "pack:mac:dev": "AGENT_SHELL_CHANNEL=dev node build.mjs && electron-builder --mac --publish never -c.appId=com.agentshell.app.dev -c.productName=\"Agent Shell Dev\"",
+    "pack:mac:dev": "cross-env AGENT_SHELL_CHANNEL=dev node build.mjs && electron-builder --mac --publish never -c.appId=com.agentshell.app.dev -c.productName=\"Agent Shell Dev\"",
     "pack:win": "node build.mjs && electron-builder --win --publish never",
-    "pack:win:dev": "AGENT_SHELL_CHANNEL=dev node build.mjs && electron-builder --win --publish never -c.appId=com.agentshell.app.dev -c.productName=\"Agent Shell Dev\""
+    "pack:win:dev": "cross-env AGENT_SHELL_CHANNEL=dev node build.mjs && electron-builder --win --publish never -c.appId=com.agentshell.app.dev -c.productName=\"Agent Shell Dev\""
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.3.161",
+    "@anthropic-ai/claude-agent-sdk": "0.3.167",
+    "@openai/codex": "0.137.0",
     "better-sqlite3": "^12.10.0"
   },
   "devDependencies": {
@@ -23,6 +24,7 @@
     "@agent-shell/sidecar": "workspace:*",
     "@electron/rebuild": "^3.6.0",
     "@types/node": "^22.0.0",
+    "cross-env": "^7.0.3",
     "electron": "41.7.1",
     "electron-builder": "^25.1.8",
     "electron-updater": "^6.3.9",

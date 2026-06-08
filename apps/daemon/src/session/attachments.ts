@@ -42,3 +42,9 @@ export function buildPromptWithAttachments(text: string, listed: ListedAttachmen
   if (listed.length === 0) return text
   return `${text}\n\nAttached project files: ${listed.map((l) => `\`${l.path}\``).join(', ')}`
 }
+
+/** 把「当前预览的活动文件」拼成独立语义块追加到末尾（只给路径，与手动附件 preamble 分离）。空/null/undefined → 原文不变。 */
+export function appendCurrentFile(text: string, activeFile: string | null | undefined): string {
+  if (!activeFile) return text
+  return `${text}\n\n<current_file>${activeFile}</current_file>`
+}

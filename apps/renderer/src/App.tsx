@@ -1,5 +1,6 @@
 import { AppNav } from './nav/AppNav'
 import { SettingsProvider, useSettings } from './settings/SettingsContext'
+import { NotificationsProvider } from './notifications/NotificationsContext'
 import { Settings } from './settings/Settings'
 import { VersionBadge } from './shell/VersionBadge'
 
@@ -11,9 +12,11 @@ function SettingsHost() {
 export function App() {
   return (
     <SettingsProvider>
-      <AppNav />
-      <SettingsHost />
-      <VersionBadge />
+      <NotificationsProvider>
+        <AppNav />
+        <SettingsHost />
+        <VersionBadge />
+      </NotificationsProvider>
     </SettingsProvider>
   )
 }

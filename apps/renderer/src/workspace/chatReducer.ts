@@ -1,3 +1,4 @@
+import type { TranscriptRecord } from '@agent-shell/contracts'
 import type { AgentEvent, Block, MessageDTO } from '../api/types'
 
 export type RunStatus = 'idle' | 'running' | 'completed' | 'failed' | 'aborted'
@@ -38,10 +39,13 @@ export const initialChat = (): ChatState => ({ messages: [], liveBlocks: null, p
 export interface SliceHooks {
   reduce?: (sliceState: unknown, ev: AgentEvent) => unknown
   initSliceState?: () => unknown
+  /** 重载时从 transcript records replay 切片私有块还原 sliceState（P5c；缺省 → 回落 initSliceState）。 */
+  rebuildSliceState?: (records: TranscriptRecord[]) => unknown
 }
 
 export type ChatAction =
-  | { type: 'loadHistory'; messages: MessageDTO[]; running: boolean; status?: string; slice?: SliceHooks }
+  // records：本会话 transcript 原始记录（用于切片 rebuildSliceState 还原私有累计态，如 codex 子代理 P5c）。
+  | { type: 'loadHistory'; messages: MessageDTO[]; running: boolean; status?: string; slice?: SliceHooks; records?: TranscriptRecord[] }
   | { type: 'optimisticUser'; text: string; attachments?: { name: string; path: string }[] }
   | { type: 'event'; ev: AgentEvent; slice?: SliceHooks }
 
@@ -61,7 +65,12 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         : action.status === 'failed' ? 'failed'
         : action.status === 'aborted' ? 'aborted'
         : 'idle'
-      return { messages: action.messages, liveBlocks: null, pendingRequests: [], runStatus, sliceState: action.slice?.initSliceState?.() }
+      // 切片私有累计态种子（P5c）：优先用 rebuildSliceState 从 records replay 还原（codex 子代理重载===live），
+      // 切片不实现（claude）或无 records → 回落 initSliceState（空态）。外壳只透传 records、不解释私有结构。
+      const sliceState = action.records !== undefined && action.slice?.rebuildSliceState
+        ? action.slice.rebuildSliceState(action.records)
+        : action.slice?.initSliceState?.()
+      return { messages: action.messages, liveBlocks: null, pendingRequests: [], runStatus, sliceState }
     }
 
     case 'optimisticUser':

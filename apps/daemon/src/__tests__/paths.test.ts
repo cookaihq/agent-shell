@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest'
 import os from 'node:os'
 import path from 'node:path'
-import { channelDataDir, defaultSkillsDir, configPath, defaultProjectsDir } from '../paths'
+import { channelDataDir, defaultSkillsDir, configPath, defaultProjectsDir, defaultAutomationsDir } from '../paths'
 
 describe('channelDataDir / 渠道路径隔离', () => {
   afterEach(() => { delete process.env.AGENT_SHELL_DATA_DIR; delete process.env.AGENT_SHELL_PROJECTS_DIR })
@@ -27,5 +27,15 @@ describe('channelDataDir / 渠道路径隔离', () => {
   it('设 AGENT_SHELL_PROJECTS_DIR=AgentShell-dev → dev 渠道项目目录随之隔离', () => {
     process.env.AGENT_SHELL_PROJECTS_DIR = 'AgentShell-dev'
     expect(defaultProjectsDir()).toBe(path.join(os.homedir(), 'AgentShell-dev', 'projects'))
+  })
+})
+
+describe('defaultAutomationsDir', () => {
+  it('= 渠道数据目录下的 automations 子目录', () => {
+    expect(defaultAutomationsDir()).toBe(path.join(channelDataDir(), 'automations'))
+  })
+  it('默认在 home 的 .agent-shell 下', () => {
+    delete process.env.AGENT_SHELL_DATA_DIR
+    expect(defaultAutomationsDir()).toBe(path.join(os.homedir(), '.agent-shell', 'automations'))
   })
 })

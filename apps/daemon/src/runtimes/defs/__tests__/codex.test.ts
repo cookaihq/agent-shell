@@ -2,12 +2,12 @@ import { describe, it, expect } from 'vitest'
 import { codexDef } from '../codex'
 
 describe('codexDef', () => {
-  it('def 元信息：codex 单次、prompt 走 stdin text、写完关 stdin、turn 靠进程退出', () => {
+  it('def 元信息：codex prompt 走 stdin text；turnBoundary=event（Part A 改 app-server 常驻，一进程多 turn）', () => {
     expect(codexDef.engine).toBe('codex')
     expect(codexDef.bin).toBe('codex')
     expect(codexDef.promptInputFormat).toBe('text')
-    expect(codexDef.closeStdinAfterPrompt).toBe(true)
-    expect(codexDef.turnBoundary).toBe('exit')
+    expect(codexDef.closeStdinAfterPrompt).toBe(true)   // [vestigial] 旧 CLI exec 路径残留，app-server 不读
+    expect(codexDef.turnBoundary).toBe('event')          // [Part A] 常驻保活：turn/completed 不退、等 pushUser（对齐 claude）
     expect(codexDef.authStrategy).toEqual({ apiKeyEnv: 'OPENAI_API_KEY', baseUrlEnv: 'OPENAI_BASE_URL' })
   })
 

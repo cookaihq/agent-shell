@@ -1,11 +1,19 @@
 import type { AgentEvent, NeutralTool, SessionOrigin, AutomationRunStatus } from '@agent-shell/contracts'
 export type { AgentEvent, NeutralTool }
 // 定时自动化类型直接复用契约（单一真相，不重复定义）
-export type { AutomationSchedule, AutomationTarget, AutomationRunStatus, AutomationTrigger, AutomationDTO, AutomationRunDTO, SessionOrigin } from '@agent-shell/contracts'
+export type { AutomationSchedule, AutomationTriggerDef, AutomationTarget, AutomationRunStatus, AutomationRunTrigger, AutomationDTO, AutomationRunDTO, SessionOrigin, CatNode } from '@agent-shell/contracts'
+export type { SecretView, EntityRequirement, ReqSlot, SecretsResp } from '@agent-shell/contracts'
+export type { SkillGroupDef, AddGroupReq, PatchGroupReq } from '@agent-shell/contracts'
+export type { AuthStatusResp, EngineAuthStatus, CliLoginStatus, StartOAuthResp, FinishOAuthResp, CodexLoginResp, CodexLoginStatusResp } from '@agent-shell/contracts'
+export type { ProxyView, ProxyProtocol, ProxyTestResult, CreateProxyReq, UpdateProxyReq } from '@agent-shell/contracts'
 export type Engine = 'claude' | 'codex'
+// codex 两轴权限（手写镜像契约 CodexSandbox/CodexApproval/CodexEffort）
+export type CodexSandbox = 'read-only' | 'workspace-write' | 'danger-full-access'
+export type CodexApproval = 'untrusted' | 'on-request' | 'never'
+export type CodexEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
 export type SessionStatus = 'idle' | 'completed' | 'failed' | 'aborted'
 export type ProjectStatus = 'running' | 'completed' | 'failed' | 'aborted' | 'idle'
-export interface ProjectDTO { id: string; name: string; path: string; createdAt: number; status: ProjectStatus; engine: Engine }
+export interface ProjectDTO { id: string; name: string; path: string; createdAt: number; status: ProjectStatus; engine: Engine; selectedAgent: Engine | null }
 export interface SessionDTO { id: string; projectId: string; engine: Engine; model: string; title: string; pinned: boolean; status: SessionStatus; resumableId: string | null; permissionMode?: string | null; effort?: string | null; claudeCodeVersion?: string | null; sdkVersion?: string | null; createdAt: number
   // 来源派生（§5.3，来自 automation_runs 关联；manual=用户手动开，automation=自动化产出）
   origin?: SessionOrigin; automationId?: string; automationName?: string; scheduleSummary?: string; automationRunStatus?: AutomationRunStatus }
@@ -37,26 +45,40 @@ export interface SubagentMeta {
   summary?: string
   skipTranscript?: boolean
 }
-export interface MessageDTO { id: string; sessionId: string; role: 'user' | 'assistant'; blocks: Block[]; createdAt: number; sdkMessageId?: string; sdkUuid?: string }
+export interface MessageDTO { id: string; sessionId: string; role: 'user' | 'assistant'; blocks: Block[]; createdAt: number; sdkMessageId?: string; sdkUuid?: string; checkpointId?: string }
 export interface FileNode { name: string; path: string; type: 'file' | 'dir'; symlink?: boolean; mtimeMs?: number; birthtimeMs?: number; children?: FileNode[] }
 export interface UsageDTO { inputTokens: number; outputTokens: number; costUsd?: number; contextWindow?: number; contextTokens?: number; contextWindowIsAuthoritative?: boolean }
-export interface AppConfig { projectsDir: string; skillsDir: string; debugMode?: boolean; engineModels?: Record<Engine, string> }
+export interface AppConfig { projectsDir: string; skillsDir: string; debugMode?: boolean; engineModels?: Record<Engine, string>; modelAliases?: Record<Engine, Record<string, string>> }
 export interface EngineDetail { name: Engine; label: string; bin: string | null; version: string | null }
-export interface EngineUpdateInfo { name: Engine; latestVersion: string | null; updateUrl: string }
 export type SkillSource = 'git' | 'folder'
 export interface Skill { name: string; source: SkillSource; origin: string; desc: string }
 export type GitProvider = 'github' | 'gitee' | 'cnb' | 'gitlab' | 'other'
-export type SourceType = 'folder' | 'git' | 'market'
+export type SourceType = 'folder' | 'git' | 'market' | 'builtin'
 export type UpdateMode = 'manual' | 'auto' | 'autolib'
-export interface SkillSourceDef { id: string; type: SourceType; name: string; loc: string; provider?: GitProvider; branch?: string; private?: boolean; user?: string; token?: string; updateMode: UpdateMode; sortIndex: number }
+export interface SkillSourceDef { id: string; type: SourceType; name: string; loc: string; provider?: GitProvider; branch?: string; private?: boolean; user?: string; token?: string; groupId?: string; updateMode: UpdateMode; sortIndex: number }
 export interface ProbedSkill { sourceId: string; name: string; relPath: string; desc: string; inLib: boolean; effectiveName?: string; globalIn: Engine[] }
-export interface LibrarySkill { effectiveName: string; name: string; desc: string; sourceId: string; sourceName: string; globalIn: Engine[] }
-// 命令行工具市场（Issue 13）：def 由 renderer 内置推荐 JSON / 自定义表单产出，加入后 daemon 持久化并生成 SKILL.md
-export interface CliToolDef { id: string; name: string; cmd: string; tags: string[]; desc: string; install?: string; home?: string; usage: string; friendliness: number; custom: boolean }
+export interface LibrarySkill { effectiveName: string; name: string; desc: string; sourceId: string; sourceName: string; globalIn: Engine[]; needsConfig?: boolean; autoInject?: boolean }
+// 命令行工具（CodePilot 接入方案）：catalog 来自 daemon，runtime 来自 /cli-tools/installed；安装由 agent MCP 工具执行
+export type CliToolPlatform = 'darwin' | 'linux' | 'win32'
+export interface CliToolInstallMethod { method: string; command: string; platforms: CliToolPlatform[] }
+export interface CliToolDef {
+  id: string; name: string; binNames: string[]; summary: string; categories: string[]
+  installMethods: CliToolInstallMethod[]; detailIntro: string; useCases: string[]; guideSteps: string[]
+  examplePrompts: { label: string; prompt: string }[]; friendliness: number
+  home?: string; repoUrl?: string; docsUrl?: string; custom: boolean
+}
+export interface CustomCliTool { id: string; name: string; binName: string; binPath: string; version: string | null; installMethod?: string; installPackage?: string; description?: string; createdAt: number }
+export interface CliToolRuntimeInfo { id: string; status: 'installed' | 'not_installed'; version: string | null; binPath: string | null }
+export interface CliInstalledResp { detected: CliToolRuntimeInfo[]; custom: CustomCliTool[]; platform: CliToolPlatform }
 export type ProviderKeyEnv = 'api_key' | 'auth_token'
+export type ProviderWireApi = 'chat' | 'responses'
+export interface ProviderModel { value: string; label: string }
 export interface ProviderView {
   id: string; engine: Engine; name: string; baseUrl: string
   keyEnv: ProviderKeyEnv; hasKey: boolean; maskedKey: string; sortIndex: number; createdAt: number
+  // 密钥来源统一到密钥库：apiKeySecretId 指向 secrets 表里的一条（替代旧的「Provider 自带裸 key」）
+  apiKeySecretId?: string
+  models: ProviderModel[]; defaultModel?: string; wireApi: ProviderWireApi
 }
 export interface ProvidersResp { engines: Record<Engine, { active: string; providers: ProviderView[] }> }
 export interface TestProviderRes { ok: boolean; status?: number; requestText: string; responseText: string }

@@ -5,8 +5,8 @@ import { vi } from 'vitest'
 import { Home } from '../Home'
 import type { ProjectDTO } from '../../api/types'
 const projs: ProjectDTO[] = [
-  { id: 'p1', name: 'seed-pitch-deck', path: '/x', createdAt: Date.now(), status: 'running', engine: 'claude' },
-  { id: 'p2', name: 'api-gateway', path: '/y', createdAt: Date.now(), status: 'failed', engine: 'codex' },
+  { id: 'p1', name: 'seed-pitch-deck', path: '/x', createdAt: Date.now(), status: 'running', engine: 'claude', selectedAgent: null },
+  { id: 'p2', name: 'api-gateway', path: '/y', createdAt: Date.now(), status: 'failed', engine: 'codex', selectedAgent: null },
 ]
 function setup(over: Partial<React.ComponentProps<typeof Home>> = {}) {
   const props = { projects: projs, onSend: vi.fn(), onOpenProject: vi.fn(), onViewAll: vi.fn(), skillCount: 0, onOpenSkillModal: vi.fn(), ...over }

@@ -12,6 +12,10 @@ describe('desktop 桥契约常量', () => {
     expect(DESKTOP_IPC.openExternal).toBe('agent-shell:open-external')
     expect(DESKTOP_IPC.trashItem).toBe('agent-shell:trash-item')
     expect(DESKTOP_IPC.showItemInFolder).toBe('agent-shell:show-item')
+    expect(DESKTOP_IPC.updateState).toBe('agent-shell:update-state')
+    expect(DESKTOP_IPC.updateAvailable).toBe('agent-shell:update-available')
+    expect(DESKTOP_IPC.detectEditors).toBe('agent-shell:detect-editors')
+    expect(DESKTOP_IPC.openInEditor).toBe('agent-shell:open-in-editor')
   })
   it('鉴权头名小写、错误码稳定', () => {
     expect(AUTH_HEADER).toBe('x-agent-shell-token')

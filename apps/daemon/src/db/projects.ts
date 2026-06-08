@@ -4,8 +4,14 @@ import type { CreateProjectInput, ProjectRow } from './types'
 import type { Engine, ProjectStatus } from '@agent-shell/contracts'
 import { getSessionsByProject } from './sessions'
 
-interface ProjectDbRow { id: string; name: string; path: string; created_at: number }
-const toRow = (r: ProjectDbRow): ProjectRow => ({ id: r.id, name: r.name, path: r.path, createdAt: r.created_at })
+interface ProjectDbRow { id: string; name: string; path: string; selected_agent: string | null; created_at: number }
+const toRow = (r: ProjectDbRow): ProjectRow => ({
+  id: r.id,
+  name: r.name,
+  path: r.path,
+  selectedAgent: r.selected_agent as Engine | null,
+  createdAt: r.created_at,
+})
 
 /** 项目目录名 = 32 位 uuid（去连字符，与显示名解耦）。 */
 export function uuid32(): string {
@@ -13,10 +19,21 @@ export function uuid32(): string {
 }
 
 export function createProject(db: Database.Database, input: CreateProjectInput): ProjectRow {
-  const row: ProjectRow = { id: input.id ?? uuid32(), name: input.name, path: input.path, createdAt: Date.now() }
-  db.prepare('INSERT INTO projects (id, name, path, created_at) VALUES (?, ?, ?, ?)')
-    .run(row.id, row.name, row.path, row.createdAt)
+  const row: ProjectRow = {
+    id: input.id ?? uuid32(),
+    name: input.name,
+    path: input.path,
+    selectedAgent: input.selectedAgent ?? null,
+    createdAt: Date.now(),
+  }
+  db.prepare('INSERT INTO projects (id, name, path, selected_agent, created_at) VALUES (?, ?, ?, ?, ?)')
+    .run(row.id, row.name, row.path, row.selectedAgent, row.createdAt)
   return row
+}
+
+/** 更新项目级持久化选中 Agent（Part B T1）。 */
+export function setProjectSelectedAgent(db: Database.Database, id: string, engine: Engine): void {
+  db.prepare('UPDATE projects SET selected_agent = ? WHERE id = ?').run(engine, id)
 }
 
 export function getProject(db: Database.Database, id: string): ProjectRow | undefined {

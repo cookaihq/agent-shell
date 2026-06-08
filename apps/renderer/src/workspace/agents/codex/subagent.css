@@ -1,0 +1,66 @@
+/* codex 切片 subagent 样式（从原型开发版 base.css 物理拆出，spec §4.2/§6）。
+   命名空间 .codex-pool / .cxp-* 与 claude .sa-* 完全独立。
+   设计要点：强调并发（.cxp-rail 纵向导轨）+ 完整子流（.cxp-inner）+ wait 编排（.cxp-wait）+ 汇报（.cxp-report）。 */
+
+/* ── 形态 A：时间线内「并行子代理组」整块 ── */
+.codex-pool{margin:8px 0;border:1px solid var(--blue-border);border-radius:var(--radius);background:color-mix(in srgb,var(--blue-bg) 55%,var(--bg-panel));overflow:hidden}
+.cxp-head{display:flex;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid var(--blue-border);background:color-mix(in srgb,var(--blue-bg) 80%,var(--bg-panel));font-size:12.5px;min-width:0}
+.cxp-icon{flex:0 0 auto;width:18px;height:18px;border-radius:5px;background:var(--blue);color:#fff;display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;font-family:var(--mono)}
+.cxp-title{flex:1 1 auto;min-width:0;font-weight:600;color:var(--blue);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cxp-wait{flex:0 0 auto;display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:500;padding:2px 9px;border-radius:999px;border:1px solid var(--blue-border);background:var(--blue-bg);color:var(--blue);white-space:nowrap}
+.cxp-wait.done{border-color:var(--green-border);background:var(--green-bg);color:var(--green)}
+.cxp-wait-dot{width:6px;height:6px;border-radius:50%;background:var(--blue);animation:pulse 1.3s ease-in-out infinite;flex:0 0 auto}
+.cxp-wait.done .cxp-wait-dot{display:none}
+
+/* 并发列表（带左侧纵向导轨表示并发）*/
+.cxp-list{padding:10px 12px;display:flex;flex-direction:column;gap:0;position:relative}
+.cxp-rail{position:absolute;left:20px;top:14px;bottom:14px;width:2px;background:linear-gradient(to bottom,var(--blue-border),var(--blue-border));border-radius:2px;pointer-events:none}
+.cxp-agent{margin-bottom:6px;border:1px solid var(--blue-border);border-radius:var(--radius-sm);background:var(--bg-panel);overflow:hidden;position:relative}
+.cxp-agent:last-child{margin-bottom:0}
+.cxp-agent>summary::before{content:'';position:absolute;left:-20px;top:50%;transform:translateY(-50%);width:8px;height:8px;border-radius:50%;background:var(--blue-bg);border:2px solid var(--blue-border);pointer-events:none}
+.cxp-agent>summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:8px;padding:8px 10px;font-size:12.5px;min-width:0;position:relative;margin-left:16px}
+.cxp-agent>summary::-webkit-details-marker{display:none}
+.cxp-stat{flex:0 0 auto;width:8px;height:8px;border-radius:50%}
+.cxp-stat.run{background:var(--blue);animation:pulse 1.3s ease-in-out infinite}
+.cxp-stat.done{background:var(--green)}
+.cxp-stat.pending{background:var(--border-strong)}
+.cxp-task{flex:1 1 auto;min-width:0;font-weight:600;color:var(--text-strong);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cxp-meta{flex:0 0 auto;font-family:var(--mono);font-size:10.5px;color:var(--text-soft);white-space:nowrap}
+.cxp-chev{flex:0 0 auto;color:var(--text-faint);transition:transform .15s;font-size:11px}
+.cxp-agent[open]>summary .cxp-chev{transform:rotate(90deg)}
+
+/* 展开内容：该子代理完整 mini 时间线 */
+.cxp-inner{display:none;padding:8px 12px 10px 12px;border-top:1px solid var(--blue-border);background:color-mix(in srgb,var(--blue-bg) 20%,var(--bg-panel))}
+.cxp-agent[open] .cxp-inner{display:block}
+.cxp-inner .chat-timeline{margin:0}
+/* 汇报 message：子代理完成时给主代理的最终汇报 */
+.cxp-report{margin-top:8px;display:flex;align-items:flex-start;gap:7px;padding:7px 10px;border-radius:6px;border:1px solid var(--blue-border);background:var(--blue-bg);font-size:12px;line-height:1.5;color:var(--blue)}
+.cxp-report-ic{flex:0 0 auto;font-size:13px}
+.cxp-report-text{flex:1 1 auto;min-width:0}
+
+/* ── 形态 B：右侧「并发流看板」面板 ── */
+.cxp-panel{height:100%;display:flex;flex-direction:column;overflow:hidden}
+.cxp-pbar{flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 14px;border-bottom:1px solid var(--border);font-size:12px;color:var(--text-muted)}
+.cxp-pbar b{color:var(--text-strong)}
+.cxp-pbar .cxp-icon{background:var(--blue)}
+/* 面板基类对齐 claude fw-panel-agents：flex 纵排，避免 .fw-panel.is-active{display:block} 退化 */
+.fw-panel.fw-panel-codex-agents.is-active{display:flex}
+.fw-panel-codex-agents{flex-direction:column}
+/* Board：固定列宽横排，每列 = 一个并发子代理 */
+.cxp-board{flex:1 1 auto;min-height:0;display:flex;gap:12px;overflow-x:auto;overflow-y:hidden;padding:12px}
+.cxp-col{flex:0 0 300px;width:300px;height:100%;display:flex;flex-direction:column;border:1px solid var(--blue-border);border-radius:var(--radius);background:var(--bg-panel);overflow:hidden;box-shadow:var(--shadow-xs)}
+.cxp-col.is-run{border-color:var(--blue-border);box-shadow:0 0 0 3px color-mix(in srgb,var(--blue) 9%,transparent)}
+.cxp-col-head{flex:0 0 auto;display:flex;align-items:center;gap:7px;padding:9px 11px;border-bottom:1px solid var(--border-soft);font-size:12.5px}
+.cxp-col-head .cxp-stat{margin-left:0}
+/* 列头右侧状态徽章（取代原型的内联样式）*/
+.cxp-col-badge{margin-left:auto;flex:0 0 auto;font-size:10.5px;padding:1px 7px;border-radius:999px;border:1px solid var(--border);background:var(--bg-subtle);color:var(--text-muted)}
+.cxp-col-badge.run{border-color:var(--blue-border);background:var(--blue-bg);color:var(--blue)}
+.cxp-col-badge.done{border-color:var(--green-border);background:var(--green-bg);color:var(--green)}
+.cxp-col-task-label{font-size:11px;color:var(--text);padding:7px 11px 5px;border-bottom:1px solid var(--border-soft);background:color-mix(in srgb,var(--blue-bg) 40%,var(--bg-panel));font-weight:500}
+.cxp-col-body{flex:1 1 auto;overflow-y:auto;padding:8px 11px 6px}
+.cxp-col-body .chat-timeline{margin:0}
+.cxp-col-body .cxp-report{margin-top:6px}
+
+/* ── 形态 C：header 头像入口（cxp-entry，复用 .sa-entry/.sa-stack 骨架）── */
+.cxp-entry .sa-stack .sa-ava.cxp-ava{background:var(--blue-bg);color:var(--blue);border-color:color-mix(in srgb,var(--blue) 45%,transparent);font-size:10px}
+.cxp-entry:hover{background:var(--blue-bg);color:var(--blue)}

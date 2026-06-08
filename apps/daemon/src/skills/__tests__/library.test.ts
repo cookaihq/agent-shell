@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path'
+import { createHash } from 'node:crypto'
 import { makeLibrary } from '../library'
 
 let skillsDir: string, srcDir: string
@@ -60,5 +61,44 @@ describe('library materialize + 重名消歧', () => {
     expect(eff).toBe('pdf')
     expect(fs.existsSync(path.join(skillsDir, 'pdf', 'SKILL.md'))).toBe(true)   // 源未被删
     expect(lib.manifest()['pdf']).toMatchObject({ sourceId: 'A', name: 'pdf', relPath: 'pdf/' })
+  })
+})
+
+describe('library autoInject seed + fingerprint + setAutoInject', () => {
+  it('add 写入 fingerprint（SKILL.md 内容 hash）', () => {
+    const skillMd = '---\nname: a\ndescription: d\n---\n'
+    const p = path.join(srcDir, 'a'); fs.mkdirSync(p, { recursive: true })
+    fs.writeFileSync(path.join(p, 'SKILL.md'), skillMd)
+    const lib = makeLibrary(skillsDir)
+    lib.add({ sourceId: 's', name: 'a', srcSkillDir: p, relPath: 'a/' })
+    const expected = createHash('sha256').update(Buffer.from(skillMd)).digest('hex')
+    expect(lib.manifest()['a'].fingerprint).toBe(expected)
+  })
+  it('add 新建条目取 frontmatter autoInject 种子', () => {
+    const skillMd = '---\nname: a\ndescription: d\nautoInject: true\n---\n'
+    const p = path.join(srcDir, 'a'); fs.mkdirSync(p, { recursive: true })
+    fs.writeFileSync(path.join(p, 'SKILL.md'), skillMd)
+    const lib = makeLibrary(skillsDir)
+    lib.add({ sourceId: 's', name: 'a', srcSkillDir: p, relPath: 'a/' })
+    expect(lib.manifest()['a'].autoInject).toBe(true)
+  })
+  it('add 幂等不覆盖用户已改的 autoInject', () => {
+    const skillMd = '---\nname: a\ndescription: d\nautoInject: true\n---\n'
+    const p = path.join(srcDir, 'a'); fs.mkdirSync(p, { recursive: true })
+    fs.writeFileSync(path.join(p, 'SKILL.md'), skillMd)
+    const lib = makeLibrary(skillsDir)
+    lib.add({ sourceId: 's', name: 'a', srcSkillDir: p, relPath: 'a/' })
+    lib.setAutoInject('a', false)
+    lib.add({ sourceId: 's', name: 'a', srcSkillDir: p, relPath: 'a/' })  // 幂等，不覆盖
+    expect(lib.manifest()['a'].autoInject).toBe(false)
+  })
+  it('setAutoInject 改开关 + 不存在的 eff 无副作用', () => {
+    mkSkill(srcDir, 'a', 'a')
+    const lib = makeLibrary(skillsDir)
+    lib.add({ sourceId: 's', name: 'a', srcSkillDir: path.join(srcDir, 'a'), relPath: 'a/' })
+    lib.setAutoInject('a', true)
+    expect(lib.manifest()['a'].autoInject).toBe(true)
+    lib.setAutoInject('nope', true)  // 不存在，无副作用，无抛
+    expect(lib.manifest()['nope']).toBeUndefined()
   })
 })

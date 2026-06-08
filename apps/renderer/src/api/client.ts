@@ -1,5 +1,5 @@
-import type { ProjectDTO, SessionDTO, FileNode, UsageDTO, Engine, AppConfig, EngineDetail, EngineUpdateInfo, Skill, SkillSourceDef, ProbedSkill, LibrarySkill, CliToolDef, UpdateMode, ProvidersResp, ProviderView, TestProviderRes, ProviderKeyEnv, SlashCommand, AutomationDTO, AutomationRunDTO, AutomationSchedule, AutomationTarget } from './types'
-import { AUTH_HEADER, type AgentShellBridge, type TranscriptRecord } from '@agent-shell/contracts'
+import type { ProjectDTO, SessionDTO, FileNode, UsageDTO, Engine, AppConfig, EngineDetail, Skill, SkillSourceDef, SkillGroupDef, ProbedSkill, LibrarySkill, CliToolDef, CustomCliTool, CliInstalledResp, UpdateMode, ProvidersResp, ProviderView, TestProviderRes, ProviderKeyEnv, ProviderModel, ProviderWireApi, SlashCommand, AutomationDTO, AutomationRunDTO, AutomationSchedule, AutomationTriggerDef, AutomationTarget, CatNode, SecretView, SecretsResp, EntityRequirement, ReqSlot, AuthStatusResp, StartOAuthResp, FinishOAuthResp, CodexLoginResp, CodexLoginStatusResp, ProxyView, ProxyProtocol, ProxyTestResult } from './types'
+import { AUTH_HEADER, type AgentShellBridge, type TranscriptRecord, type RemindersConfig } from '@agent-shell/contracts'
 const BASE = '/api'
 const JSON_H = { 'content-type': 'application/json' }
 
@@ -31,39 +31,45 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   engines: () => req<{ engines: Record<string, string | null> }>('/engines'),
   enginesDetail: () => req<{ engines: EngineDetail[] }>('/engines/detail'),
-  enginesUpdates: () => req<{ updates: EngineUpdateInfo[] }>('/engines/updates'),
   testEngine: (name: string) => req<{ ok: boolean; version: string | null; message?: string }>(`/engines/${name}/test`, { method: 'POST' }),
   listProjects: () => req<{ projects: ProjectDTO[] }>('/projects'),
-  createProject: (name: string, skills: string[] = []) => req<{ projectId: string; path: string }>('/projects', { method: 'POST', headers: JSON_H, body: JSON.stringify({ name, skills }) }),
+  createProject: (name: string, skills?: string[]) =>
+    req<{ projectId: string; path: string }>('/projects', { method: 'POST', headers: JSON_H,
+      body: JSON.stringify({ name, ...(skills !== undefined ? { skills } : {}) }) }),
   // 对已打开项目注入技能（子系统 P3）：把技能库选中项软链进 <project>/.claude/skills（仅 claude，daemon 幂等）。names 为 LibrarySkill.effectiveName 列表。
   injectSkills: (projectId: string, skills: string[]) => req<{ ok: true }>(`/projects/${projectId}/inject-skills`, { method: 'POST', headers: JSON_H, body: JSON.stringify({ skills }) }),
   renameProject: (id: string, name: string) => req<void>(`/projects/${id}`, { method: 'PUT', headers: JSON_H, body: JSON.stringify({ name }) }),
+  patchProject: (id: string, b: { selectedAgent: Engine }) => req<void>(`/projects/${id}`, { method: 'PATCH', headers: JSON_H, body: JSON.stringify(b) }),
   deleteProject: (id: string) => req<{ ok: true }>(`/projects/${id}`, { method: 'DELETE' }),
   listSessions: (projectId: string) => req<{ sessions: SessionDTO[] }>(`/projects/${projectId}/sessions`),
   // ── 定时自动化（spec §8）──
   listAutomations: () => req<{ automations: AutomationDTO[] }>('/automations'),
-  createAutomation: (b: { name: string; prompt: string; engine: Engine; model: string; permission: string; categories: string[]; schedule: AutomationSchedule; target: AutomationTarget; enabled?: boolean }) =>
+  createAutomation: (b: { name: string; description?: string; prompt: string; engine: Engine; model: string; permission: string; category?: string[]; tags?: string[]; requires?: { kind: 'env'; name: string }[]; triggers: AutomationTriggerDef[]; executor?: 'agent' | 'script'; script?: string; interpreter?: string; target: AutomationTarget; enabled?: boolean }) =>
     req<{ automationId: string }>('/automations', { method: 'POST', headers: JSON_H, body: JSON.stringify(b) }),
-  patchAutomation: (id: string, b: Partial<{ name: string; prompt: string; engine: Engine; model: string; permission: string; categories: string[]; schedule: AutomationSchedule; target: AutomationTarget; enabled: boolean }>) =>
+  patchAutomation: (id: string, b: Partial<{ name: string; description: string; prompt: string; engine: Engine; model: string; permission: string; category: string[]; tags: string[]; requires: { kind: 'env'; name: string }[]; triggers: AutomationTriggerDef[]; executor: 'agent' | 'script'; script: string; interpreter: string; target: AutomationTarget; enabled: boolean }>) =>
     req<{ automation: AutomationDTO }>(`/automations/${id}`, { method: 'PATCH', headers: JSON_H, body: JSON.stringify(b) }),
   deleteAutomation: (id: string) => req<{ ok: true }>(`/automations/${id}`, { method: 'DELETE' }),
   runAutomation: (id: string) => req<void>(`/automations/${id}/run`, { method: 'POST' }),
   listAutomationRuns: (id: string) => req<{ runs: AutomationRunDTO[] }>(`/automations/${id}/runs`),
+  // 分类树（Plan D D6）：管理分类模态读写。
+  listAutomationCategories: () => req<{ tree: CatNode[] }>('/automation-categories'),
+  putAutomationCategories: (tree: CatNode[]) =>
+    req<{ ok: true }>('/automation-categories', { method: 'PUT', headers: JSON_H, body: JSON.stringify({ tree }) }),
   createSession: (b: { projectId: string; engine: Engine; model: string; title?: string }) => req<{ sessionId: string }>('/sessions', { method: 'POST', headers: JSON_H, body: JSON.stringify(b) }),
-  patchSession: (id: string, b: { pinned?: boolean; title?: string }) => req<void>(`/sessions/${id}`, { method: 'PATCH', headers: JSON_H, body: JSON.stringify(b) }),
+  patchSession: (id: string, b: { pinned?: boolean; title?: string; engine?: Engine; model?: string }) => req<void>(`/sessions/${id}`, { method: 'PATCH', headers: JSON_H, body: JSON.stringify(b) }),
   deleteSession: (id: string) => req<{ ok: true }>(`/sessions/${id}`, { method: 'DELETE' }),
   // §8：端点回吐原始 transcript records（重建下沉 renderer 切片 historyService.rebuildBlocks）。
   messages: (sid: string) => req<{ records: TranscriptRecord[] }>(`/sessions/${sid}/messages`),
   // contextFiles：消息附件路径（项目内相对 / 项目外绝对），daemon 据此拼 preamble + 授权读取
   // runtime：claude 权限档/思考强度，随消息生效（未运行下轮 query / 运行中热切换）
-  submit: (sid: string, text: string, contextFiles: string[] = [], runtime?: { permissionMode?: string; effort?: string; model?: string; outputFormat?: { type: 'json_schema'; schema: Record<string, unknown> } }) =>
-    req<void>(`/sessions/${sid}/messages`, { method: 'POST', headers: JSON_H, body: JSON.stringify({ text, contextFiles, ...(runtime ?? {}) }) }),
+  submit: (sid: string, text: string, contextFiles: string[] = [], runtime?: { permissionMode?: string; effort?: string; sandbox?: string; approval?: string; model?: string; outputFormat?: { type: 'json_schema'; schema: Record<string, unknown> } }, activeFile?: string | null) =>
+    req<void>(`/sessions/${sid}/messages`, { method: 'POST', headers: JSON_H, body: JSON.stringify({ text, contextFiles, ...(runtime ?? {}), activeFile }) }),
   interrupt: (sid: string) => req<void>(`/sessions/${sid}/interrupt`, { method: 'POST' }),
   // 逐工具授权 / AskUserQuestion 回执：resolve daemon 侧挂起的 canUseTool
   decision: (sid: string, body: { requestId: string; behavior: 'allow' | 'deny'; message?: string; updatedInput?: Record<string, unknown> }) =>
     req<void>(`/sessions/${sid}/decision`, { method: 'POST', headers: JSON_H, body: JSON.stringify(body) }),
   // 不发消息、仅热切换运行时档位（claude 权限/思考强度）
-  setRuntime: (sid: string, body: { permissionMode?: string; effort?: string; model?: string }) =>
+  setRuntime: (sid: string, body: { permissionMode?: string; effort?: string; sandbox?: string; approval?: string; model?: string }) =>
     req<void>(`/sessions/${sid}/runtime`, { method: 'POST', headers: JSON_H, body: JSON.stringify(body) }),
   // 文件检查点回退（userMessageId 省略 → 回退到最近一次检查点）
   rewind: (sid: string, userMessageId?: string, dryRun = false) =>
@@ -105,25 +111,95 @@ export const api = {
   patchSkillSource: (id: string, b: Partial<SkillSourceDef>) => req<{ source: SkillSourceDef }>(`/skill-sources/${id}`, { method: 'PATCH', headers: JSON_H, body: JSON.stringify(b) }),
   removeSkillSource: (id: string) => req<{ ok: true }>(`/skill-sources/${id}`, { method: 'DELETE' }),
   reorderSkillSources: (order: string[]) => req<{ ok: true }>('/skill-sources/reorder', { method: 'POST', headers: JSON_H, body: JSON.stringify({ order }) }),
+  listSkillGroups: () => req<{ groups: SkillGroupDef[] }>('/skill-groups'),
+  addSkillGroup: (b: { name: string }) => req<{ group: SkillGroupDef }>('/skill-groups', { method: 'POST', headers: JSON_H, body: JSON.stringify(b) }),
+  patchSkillGroup: (id: string, b: { name?: string }) => req<{ group: SkillGroupDef }>(`/skill-groups/${id}`, { method: 'PATCH', headers: JSON_H, body: JSON.stringify(b) }),
+  removeSkillGroup: (id: string) => req<{ ok: true }>(`/skill-groups/${id}`, { method: 'DELETE' }),
+  reorderSkillGroups: (order: string[]) => req<{ ok: true }>('/skill-groups/reorder', { method: 'POST', headers: JSON_H, body: JSON.stringify({ order }) }),
   probeSkillSource: (id: string) => req<{ skills: ProbedSkill[] }>(`/skill-sources/${id}/skills`),
   skillSourceMd: (id: string, relPath: string) => req<{ content: string }>(`/skill-sources/${id}/skill-md?relPath=${encodeURIComponent(relPath)}`),
   reprobeSkillSource: (id: string) => req<{ skills: ProbedSkill[] }>(`/skill-sources/${id}/reprobe`, { method: 'POST' }),
   setSourceUpdateMode: (id: string, mode: UpdateMode) => req<{ source: SkillSourceDef }>(`/skill-sources/${id}/update-mode`, { method: 'POST', headers: JSON_H, body: JSON.stringify({ mode }) }),
   toggleSkillLib: (b: { sourceId: string; relPath: string; inLib: boolean }) => req<{ ok: true }>('/skill-library/toggle', { method: 'POST', headers: JSON_H, body: JSON.stringify(b) }),
   listSkillLibrary: () => req<{ skills: LibrarySkill[] }>('/skill-library'),
-  // 命令行工具市场（Issue 13）：list=已加入；add=加入推荐/自定义（daemon 生成 SKILL.md 入库）；detect=复用 detectBinary 探测安装
-  listCliTools: () => req<{ tools: CliToolDef[] }>('/cli-tools'),
-  addCliTool: (def: Omit<CliToolDef, 'id'> & { id?: string }) => req<{ tool: CliToolDef }>('/cli-tools', { method: 'POST', headers: JSON_H, body: JSON.stringify(def) }),
-  removeCliTool: (id: string) => req<{ ok: true }>(`/cli-tools/${id}`, { method: 'DELETE' }),
-  detectClis: (names: string[]) => req<{ detected: Record<string, string | null> }>('/cli-detect', { method: 'POST', headers: JSON_H, body: JSON.stringify({ names }) }),
+  setAutoInject: (effectiveName: string, on: boolean) =>
+    req<{ ok: true }>('/skill-library/auto-inject', { method: 'POST', headers: JSON_H, body: JSON.stringify({ effectiveName, on }) }),
+  // 命令行工具（CodePilot 接入）：catalog=目录，installed=运行时检测状态，custom CRUD。安装由 agent MCP 工具执行，无 HTTP 安装路由。
+  getCliCatalog: () => req<{ tools: CliToolDef[] }>('/cli-tools/catalog'),
+  getCliInstalled: () => req<CliInstalledResp>('/cli-tools/installed'),
+  addCustomCliTool: (binPath: string, name?: string, description?: string) =>
+    req<{ tool: CustomCliTool }>('/cli-tools/custom', { method: 'POST', headers: JSON_H, body: JSON.stringify({ binPath, name, description }) }),
+  removeCustomCliTool: (id: string) => req<{ ok: true }>(`/cli-tools/custom/${id}`, { method: 'DELETE' }),
   listProviders: () => req<ProvidersResp>('/providers'),
-  createProvider: (b: { engine: Engine; name: string; baseUrl: string; apiKey: string; keyEnv: ProviderKeyEnv }) =>
+  createProvider: (b: { engine: Engine; name: string; baseUrl: string; apiKey?: string; apiKeySecretId?: string; keyEnv: ProviderKeyEnv; models?: ProviderModel[]; defaultModel?: string; wireApi?: ProviderWireApi }) =>
     req<{ provider: ProviderView }>('/providers', { method: 'POST', headers: JSON_H, body: JSON.stringify(b) }),
-  updateProvider: (id: string, b: { name?: string; baseUrl?: string; apiKey?: string; keyEnv?: ProviderKeyEnv }) =>
+  updateProvider: (id: string, b: { name?: string; baseUrl?: string; apiKey?: string; apiKeySecretId?: string; keyEnv?: ProviderKeyEnv; models?: ProviderModel[]; defaultModel?: string; wireApi?: ProviderWireApi }) =>
     req<{ provider: ProviderView }>(`/providers/${id}`, { method: 'PUT', headers: JSON_H, body: JSON.stringify(b) }),
   deleteProvider: (id: string) => req<{ ok: true }>(`/providers/${id}`, { method: 'DELETE' }),
   setActiveProvider: (engine: Engine, providerId: string) =>
     req<{ ok: true }>('/providers/active', { method: 'PUT', headers: JSON_H, body: JSON.stringify({ engine, providerId }) }),
   testProvider: (id: string, model?: string) =>
     req<TestProviderRes>(`/providers/${id}/test`, { method: 'POST', headers: JSON_H, body: JSON.stringify({ model }) }),
+  // ── 凭证来源（spec 2026-06-07）：状态查询 + 设来源 + 设官网密钥引用 ──
+  getAuthStatus: () => req<AuthStatusResp>('/auth/status'),
+  setAuthSource: (engine: Engine, source: string) =>
+    req<{ ok: true }>('/auth/source', { method: 'PUT', headers: JSON_H, body: JSON.stringify({ engine, source }) }),
+  setOfficialKey: (engine: Engine, secretId: string) =>
+    req<{ ok: true }>('/auth/official-key', { method: 'PUT', headers: JSON_H, body: JSON.stringify({ engine, secretId }) }),
+  // ── app 内 OAuth 授权登录（Task 4.3：3 步粘码流）──
+  startOAuth: (engine: Engine) =>
+    req<StartOAuthResp>('/auth/oauth/start', { method: 'POST', headers: JSON_H, body: JSON.stringify({ engine }) }),
+  finishOAuth: (engine: Engine, code: string, state: string) =>
+    req<FinishOAuthResp>('/auth/oauth/finish', { method: 'POST', headers: JSON_H, body: JSON.stringify({ engine, code, state }) }),
+  logout: (engine: Engine) =>
+    req<{ ok: true }>('/auth/logout', { method: 'POST', headers: JSON_H, body: JSON.stringify({ engine }) }),
+  // ── codex app 内登录引导（Part A P7.4：app-server 自管，写本机 ~/.codex）──
+  // apiKey 同步成功（done:true）；chatgpt 返回 authUrl + loginSessionId，前端开浏览器后轮询 codexLoginStatus
+  codexLoginStart: (body: { type: 'apiKey'; apiKey: string } | { type: 'chatgpt' }) =>
+    req<CodexLoginResp>('/auth/codex/login', { method: 'POST', headers: JSON_H, body: JSON.stringify(body) }),
+  codexLoginStatus: (loginSessionId: string) =>
+    req<CodexLoginStatusResp>(`/auth/codex/login/${loginSessionId}`),
+  // ── 代理池（Task 5.3）──
+  listProxies: () => req<{ proxies: ProxyView[] }>('/proxies'),
+  createProxy: (b: { name: string; protocol: ProxyProtocol; host: string; port: number; username?: string; password?: string }) =>
+    req<{ proxy: ProxyView }>('/proxies', { method: 'POST', headers: JSON_H, body: JSON.stringify(b) }),
+  updateProxy: (id: string, b: { name?: string; protocol?: ProxyProtocol; host?: string; port?: number; username?: string; password?: string }) =>
+    req<{ proxy: ProxyView }>(`/proxies/${id}`, { method: 'PUT', headers: JSON_H, body: JSON.stringify(b) }),
+  deleteProxy: (id: string) => req<{ ok: true }>(`/proxies/${id}`, { method: 'DELETE' }),
+  testProxy: (id: string) => req<ProxyTestResult>(`/proxies/${id}/test`, { method: 'POST' }),
+  setSourceProxy: (engine: Engine, source: string, proxyId: string) =>
+    req<{ ok: true }>('/auth/proxy', { method: 'PUT', headers: JSON_H, body: JSON.stringify({ engine, source, proxyId }) }),
+  // ── 技能密钥/配置（P3）──
+  listSecrets: () => req<SecretsResp>('/secrets'),
+  createSecret: (b: { name: string; value: string; note?: string }) =>
+    req<{ secret: SecretView }>('/secrets', { method: 'POST', headers: JSON_H, body: JSON.stringify(b) }),
+  updateSecret: (id: string, b: { name?: string; value?: string; note?: string }) =>
+    req<{ secret: SecretView }>(`/secrets/${id}`, { method: 'PUT', headers: JSON_H, body: JSON.stringify(b) }),
+  deleteSecret: (id: string) => req<{ ok: true }>(`/secrets/${id}`, { method: 'DELETE' }),
+  listEntityRequirements: () =>
+    req<{ requirements: Record<string, EntityRequirement> }>('/entity-requirements'),
+  putEntityRequirements: (ref: string, b: { needsConfig: boolean; slotsSource: 'declared' | 'agent' | 'manual' | null; slots: ReqSlot[] }) =>
+    req<{ ok: true }>(`/entity-requirements/${encodeURIComponent(ref)}`, { method: 'PUT', headers: JSON_H, body: JSON.stringify(b) }),
+  probeSkillConfig: (b: { sourceId: string; relPath: string }) =>
+    req<{ slots: ReqSlot[] }>('/skills/probe-config', { method: 'POST', headers: JSON_H, body: JSON.stringify(b) }),
+  skillConfigCheck: (skills: string[]) =>
+    req<{ conflicts: { env: string; entityRefs: string[]; secretIds: string[] }[]; missing: { entityRef: string; slot: string }[] }>(
+      '/skill-config-check', { method: 'POST', headers: JSON_H, body: JSON.stringify({ skills }) }),
+  // ── 提醒配置（spec §7）──
+  getReminders: (projectId: string) => req<RemindersConfig>(`/projects/${projectId}/reminders`),
+  putReminders: (projectId: string, cfg: RemindersConfig) =>
+    req<RemindersConfig>(`/projects/${projectId}/reminders`, { method: 'PUT', headers: JSON_H, body: JSON.stringify(cfg) }),
+  getDefaultReminders: () => req<RemindersConfig>('/reminders/default'),
+  putDefaultReminders: (cfg: RemindersConfig) =>
+    req<RemindersConfig>('/reminders/default', { method: 'PUT', headers: JSON_H, body: JSON.stringify(cfg) }),
+  // multipart 上传；返回相对路径如 .agent-shell/sounds/xxx.m4a
+  uploadReminderSound: (projectId: string, file: File): Promise<{ file: string }> => {
+    const form = new FormData(); form.append('file', file, file.name)
+    return req<{ file: string }>(`/projects/${projectId}/reminders/sounds`, { method: 'POST', body: form })
+  },
+  // 回放端点 URL（供 <audio>/ new Audio() 使用）。
+  // 回放端点与项目文件端点（/api/pf/*）同属 daemon 资源型路由，daemon 通过同源 cookie（AUTH_HEADER）鉴权。
+  // cookie 已在 client.ts 顶部写入（bridge.authToken），无需在 URL 内嵌 token。
+  reminderSoundUrl: (projectId: string, name: string): string =>
+    `${BASE}/projects/${projectId}/reminders/sounds/${encodeURIComponent(name)}`,
 }

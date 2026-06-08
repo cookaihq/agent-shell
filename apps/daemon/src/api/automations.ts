@@ -1,13 +1,12 @@
 import express from 'express'
 import type Database from 'better-sqlite3'
 import {
-  CreateAutomationReq, PatchAutomationReq, ClaudePermissionMode,
+  CreateAutomationReq, PatchAutomationReq, PutAutomationCategoriesReq, ClaudePermissionMode,
   type ApiError, type AutomationDTO, type AutomationRunDTO,
 } from '@agent-shell/contracts'
-import {
-  createAutomation, getAutomation, listAutomations, patchAutomation, deleteAutomation,
-  listRunsByAutomation, lastRunOf, type AutomationRow, type AutomationRunRow,
-} from '../db/automations'
+import { listRunsByAutomation, lastRunOf, type AutomationRunRow } from '../db/automations'
+import type { AutomationStore, AutomationRow } from '../automation/automationStore'
+import { readCategories, writeCategories } from '../automation/automationCategories'
 import type { AutomationScheduler } from '../automation/scheduler'
 import type { AutomationRunDone } from '../automation/runHandler'
 
@@ -21,8 +20,10 @@ function validatePermission(engine: 'claude' | 'codex', permission: string): boo
 
 function toAutomationDTO(db: Database.Database, a: AutomationRow): AutomationDTO {
   return {
-    id: a.id, name: a.name, prompt: a.prompt, engine: a.engine, model: a.model, permission: a.permission,
-    categories: a.categories, schedule: a.schedule, target: a.target, enabled: a.enabled,
+    id: a.id, name: a.name, description: a.description, prompt: a.prompt, engine: a.engine, model: a.model, permission: a.permission,
+    category: a.category, tags: a.tags, requires: a.requires, triggers: a.triggers,
+    executor: a.executor, script: a.script, interpreter: a.interpreter,
+    target: a.target, enabled: a.enabled,
     nextRunAt: a.nextRunAt, createdAt: a.createdAt, updatedAt: a.updatedAt,
     lastRun: lastRunOf(db, a.id),
   }
@@ -35,17 +36,20 @@ const toRunDTO = (r: AutomationRunRow): AutomationRunDTO => ({
 
 export interface AutomationRouterDeps {
   db: Database.Database
+  store: AutomationStore
   scheduler: AutomationScheduler
+  /** 分类树存储文件路径（automation-categories.json）。 */
+  automationCategoriesPath: string
   /** 订阅 run 结束事件（SSE 路由用）。 */
   onRunDone: (fn: (d: AutomationRunDone) => void) => () => void
 }
 
-/** /automations 路由组（spec §8）。挂进主 router。 */
+/** /automations 路由组（spec §8）。挂进主 router。定义读写走文件态 store，运行历史仍读 db。 */
 export function createAutomationRouter(deps: AutomationRouterDeps): express.Router {
   const r = express.Router()
 
   r.get('/automations', (_req, res) => {
-    res.json({ automations: listAutomations(deps.db).map((a) => toAutomationDTO(deps.db, a)) })
+    res.json({ automations: deps.store.list().map((a) => toAutomationDTO(deps.db, a)) })
   })
 
   r.post('/automations', (req, res) => {
@@ -54,40 +58,51 @@ export function createAutomationRouter(deps: AutomationRouterDeps): express.Rout
     if (!validatePermission(parsed.data.engine, parsed.data.permission)) {
       return res.status(400).json(apiErr('invalid_request', '权限档与引擎不匹配'))
     }
-    const a = createAutomation(deps.db, parsed.data)
+    const a = deps.store.create(parsed.data)
     if (a.enabled) deps.scheduler.reschedule(a.id)   // 排定时器（写 nextRunAt）
     res.status(201).json({ automationId: a.id })
   })
 
   r.patch('/automations/:id', (req, res) => {
-    if (!getAutomation(deps.db, req.params.id)) return res.status(404).json(apiErr('not_found', '自动化不存在'))
+    if (!deps.store.get(req.params.id)) return res.status(404).json(apiErr('not_found', '自动化不存在'))
     const parsed = PatchAutomationReq.safeParse(req.body)
     if (!parsed.success) return res.status(400).json(apiErr('invalid_request', '自动化参数非法'))
     if (parsed.data.engine && parsed.data.permission && !validatePermission(parsed.data.engine, parsed.data.permission)) {
       return res.status(400).json(apiErr('invalid_request', '权限档与引擎不匹配'))
     }
-    const updated = patchAutomation(deps.db, req.params.id, parsed.data)!
-    // 改了启停 / 调度 → 重排（reschedule 内部对 enabled=false 取消并清 nextRunAt）
-    if (parsed.data.enabled !== undefined || parsed.data.schedule !== undefined) deps.scheduler.reschedule(updated.id)
+    const updated = deps.store.patch(req.params.id, parsed.data)!
+    // 改了启停 / 触发器 → 重排（reschedule 内部对 enabled=false 取消并清 nextRunAt）
+    if (parsed.data.enabled !== undefined || parsed.data.triggers !== undefined) deps.scheduler.reschedule(updated.id)
     res.json({ automation: toAutomationDTO(deps.db, updated) })
   })
 
   r.delete('/automations/:id', (req, res) => {
-    if (!getAutomation(deps.db, req.params.id)) return res.status(404).json(apiErr('not_found', '自动化不存在'))
+    if (!deps.store.get(req.params.id)) return res.status(404).json(apiErr('not_found', '自动化不存在'))
     deps.scheduler.cancel(req.params.id)   // 取消定时器
-    deleteAutomation(deps.db, req.params.id)
+    deps.store.delete(req.params.id)
     res.json({ ok: true })
   })
 
   r.post('/automations/:id/run', (req, res) => {
-    if (!getAutomation(deps.db, req.params.id)) return res.status(404).json(apiErr('not_found', '自动化不存在'))
+    if (!deps.store.get(req.params.id)) return res.status(404).json(apiErr('not_found', '自动化不存在'))
     void deps.scheduler.runNow(req.params.id)   // 后台跑，不阻塞响应
     res.status(202).json({ ok: true })
   })
 
   r.get('/automations/:id/runs', (req, res) => {
-    if (!getAutomation(deps.db, req.params.id)) return res.status(404).json(apiErr('not_found', '自动化不存在'))
+    if (!deps.store.get(req.params.id)) return res.status(404).json(apiErr('not_found', '自动化不存在'))
     res.json({ runs: listRunsByAutomation(deps.db, req.params.id).map(toRunDTO) })
+  })
+
+  // 分类树（Plan D D6）：管理分类模态读写。GET 缺文件回 {tree:[]}；PUT 校验后整树覆盖。
+  r.get('/automation-categories', (_req, res) => {
+    res.json(readCategories(deps.automationCategoriesPath))
+  })
+  r.put('/automation-categories', (req, res) => {
+    const parsed = PutAutomationCategoriesReq.safeParse(req.body)
+    if (!parsed.success) return res.status(400).json(apiErr('invalid_request', '分类树参数非法'))
+    writeCategories(deps.automationCategoriesPath, parsed.data.tree)
+    res.json({ ok: true })
   })
 
   // run 结束事件流（§7）：桌面壳订阅 → 跑完/失败/needs-review 弹系统通知。经 token gate（桌面壳带 auth header）。

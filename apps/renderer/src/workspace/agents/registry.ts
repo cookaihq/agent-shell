@@ -1,11 +1,19 @@
 import type { Engine, ProgressActivity } from '@agent-shell/contracts'
 import type { AgentSlice } from './types'
 import { claudeEventSchema } from './claude/events'
+import { codexEventSchema } from './codex/events'
 import { claudeChatUIConfig } from './claude/chatUIConfig'
 import { codexChatUIConfig } from './codex/chatUIConfig'
 import { claudeRebuildBlocks } from './claude/history'
-import { codexRebuildBlocks } from './codex/history'
+import { codexRebuildBlocks, codexRebuildSliceState } from './codex/history'
 import { initSubagentState, subagentReduce, timelineMount, headerEntry, rightViews } from './claude/subagent'
+import {
+  initCodexSubagentState,
+  codexSubagentReduce,
+  timelineMount as codexTimelineMount,
+  headerEntry as codexHeaderEntry,
+  rightViews as codexRightViews,
+} from './codex/subagent'
 
 /**
  * 轻量 Agent 切片注册表（右尺寸，非 Claudian 全套 Registry）。
@@ -55,11 +63,24 @@ const claudeSlice: AgentSlice = {
   timelineMount,
   headerEntry,
   rightViews,
+  supportsFileRewind: true,   // enableFileCheckpointing 已在 startTurn 开启；rewindFiles 接口可用
+  showsUnloggedBanner: true,  // claude 有本机登录态实测：cli-login 来源 + 未登录 → 显示引导 banner
 }
 // codex 窗口表待补：无核实的 GPT 上下文窗口值，暂省略 → 回落默认（不臆造数值）
-// codex 不发切片私有事件 → 不挂 eventSchema，仅接受共享生命周期事件。
+// eventSchema：codex 私有事件 = CodexSubagentEvent（多 thread 子代理 fanout），与共享生命周期并集后 safeParse。
 // historyService：codex 重建仅共享骨架（无 msg_id）。
-const codexSlice: AgentSlice = { engine: 'codex', chatUIConfig: codexChatUIConfig, historyService: { rebuildBlocks: codexRebuildBlocks } }
+// 子代理整条链（spec §4.2/§6）：threadId 索引的私有累计态 initSliceState/reduce + 三挂载槽（形态 A/C/B 照原型 cxp-*）。
+const codexSlice: AgentSlice = {
+  engine: 'codex',
+  eventSchema: codexEventSchema,
+  chatUIConfig: codexChatUIConfig,
+  historyService: { rebuildBlocks: codexRebuildBlocks, rebuildSliceState: codexRebuildSliceState },
+  initSliceState: initCodexSubagentState,
+  reduce: codexSubagentReduce,
+  timelineMount: codexTimelineMount,
+  headerEntry: codexHeaderEntry,
+  rightViews: codexRightViews,
+}
 
 export const SLICES: Record<Engine, AgentSlice> = {
   claude: claudeSlice,

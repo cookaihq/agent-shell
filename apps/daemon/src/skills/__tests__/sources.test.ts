@@ -26,3 +26,18 @@ describe('source store', () => {
     store.remove(a.id); expect(store.list()).toEqual([])
   })
 })
+
+describe('sourceStore.upsert', () => {
+  it('upsert 新 id → 追加', () => {
+    const s = makeSourceStore(file)
+    s.upsert({ id: 'builtin', type: 'builtin', name: '内置', loc: '/x', updateMode: 'autolib', sortIndex: -1 })
+    expect(s.list().filter((x) => x.id === 'builtin')).toHaveLength(1)
+  })
+  it('upsert 已有 id → 覆盖不重复（幂等）', () => {
+    const s = makeSourceStore(file)
+    s.upsert({ id: 'builtin', type: 'builtin', name: 'A', loc: '/x', updateMode: 'autolib', sortIndex: -1 })
+    s.upsert({ id: 'builtin', type: 'builtin', name: 'B', loc: '/y', updateMode: 'autolib', sortIndex: -1 })
+    const got = s.list().filter((x) => x.id === 'builtin')
+    expect(got).toHaveLength(1); expect(got[0].name).toBe('B'); expect(got[0].loc).toBe('/y')
+  })
+})

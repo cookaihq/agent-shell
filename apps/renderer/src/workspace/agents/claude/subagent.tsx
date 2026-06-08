@@ -123,9 +123,12 @@ function DelegateRow({ block, ctx }: { block: Extract<Block, { type: 'tool_use' 
   )
 }
 
-/** 左·时间线挂载（spec §6 形态 A 接缝）：外壳 renderTimeline 遇 Task 块委托此函数。
- *  §9.5/D14：skip_transcript 子代理不进内联时间线（返回 null → 节点连同子块消失）；flat（右侧）语境不过滤。 */
+/** 左·时间线挂载（spec §6 形态 A 接缝）：外壳 renderTimeline 对每个 tool_use 块委托此函数。
+ *  - 非 Task 块 → 返回 undefined（不是 claude 子代理块，外壳按中立默认渲染）。
+ *  - Task 块 + skip_transcript（§9.5/D14）→ 返回 null（节点连同子块消失）；flat（右侧）语境不过滤。
+ *  - Task 块普通 → 渲染 SubagentNode（内联）/ DelegateRow（flat）。 */
 export function timelineMount(block: Extract<Block, { type: 'tool_use' }>, ctx: SaCtx): ReactNode {
+  if (block.name !== 'Task') return undefined   // 外壳现对所有 tool_use 块委托；非 Task 交还外壳默认渲染
   const subagents = subagentsOf(ctx.sliceState)
   // 实时态读运行时 meta；重载态 meta 已清空 → 读持久化在 Task 块上的 skipTranscript（daemon 回填），保证重载后 §9.5 仍成立。
   if (!ctx.flat && (subagents[block.id]?.skipTranscript || block.skipTranscript)) return null

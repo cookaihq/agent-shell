@@ -7,13 +7,35 @@ import { ProjBar } from '../ProjBar'
 import { api } from '../../api/client'
 import { SettingsProvider } from '../../settings/SettingsContext'
 
-// Mock the api module
-vi.mock('../../api/client', () => ({
-  api: {
-    renameProject: vi.fn().mockResolvedValue(undefined),
-    getConfig: vi.fn().mockResolvedValue({ projectsDir: '/p', skillsDir: '/s' }),
-  },
-}))
+// useReminders（ProjBar 红点 + 提醒模态）依赖 useFsWatch 订阅 SSE；测试环境无 fetch，mock 掉
+vi.mock('../../hooks/useFsWatch', () => ({ useFsWatch: () => {} }))
+
+// Mock the api module（提醒相关方法须齐全：useReminders → getReminders）
+vi.mock('../../api/client', () => {
+  const DEFAULT_REMINDERS = {
+    version: 1,
+    enabled: false,
+    events: {
+      attention: { channels: [], sound: { kind: 'system', id: 'default' } },
+      complete: { channels: [], sound: { kind: 'system', id: 'default' } },
+      failed: { channels: [], sound: { kind: 'system', id: 'default' } },
+    },
+    external: { webhook: { enabled: false, secretRef: null }, feishu: { enabled: false, secretRef: null } },
+  }
+  return {
+    api: {
+      renameProject: vi.fn().mockResolvedValue(undefined),
+      getConfig: vi.fn().mockResolvedValue({ projectsDir: '/p', skillsDir: '/s' }),
+      listProviders: vi.fn().mockResolvedValue({ engines: { claude: { active: 'default', providers: [] }, codex: { active: 'default', providers: [] } } }),
+      getReminders: vi.fn().mockResolvedValue(DEFAULT_REMINDERS),
+      putReminders: vi.fn().mockResolvedValue(DEFAULT_REMINDERS),
+      uploadReminderSound: vi.fn().mockResolvedValue({ file: '.agent-shell/sounds/x.mp3' }),
+      reminderSoundUrl: (pid: string, name: string) => `/api/projects/${pid}/reminders/sounds/${name}`,
+      createSecret: vi.fn().mockResolvedValue({ secret: { id: 'sec-new', name: 'n', note: '', hasValue: true, maskedValue: '', createdAt: 0 } }),
+      updateSecret: vi.fn().mockResolvedValue({ secret: { id: 'sec-1', name: 'n', note: '', hasValue: true, maskedValue: '', createdAt: 0 } }),
+    },
+  }
+})
 
 function renderProjBar(
   opts: {
@@ -23,6 +45,7 @@ function renderProjBar(
     model?: string
     onBack?: () => void
     onRename?: (name: string) => void
+    selectedAgent?: 'claude' | 'codex' | null
   } = {}
 ) {
   const {
@@ -32,6 +55,7 @@ function renderProjBar(
     model = 'Claude Opus 4.8',
     onBack = vi.fn(),
     onRename,
+    selectedAgent,
   } = opts
 
   const runtime = initialRuntime(engine, model)
@@ -41,7 +65,7 @@ function renderProjBar(
   const tree = (name: string) => (
     <SettingsProvider>
       <RuntimeContext.Provider value={ctx}>
-        <ProjBar projectId={projectId} projectName={name} engine={engine} onBack={onBack} onRename={onRename} />
+        <ProjBar projectId={projectId} projectName={name} engine={engine} onBack={onBack} onRename={onRename} selectedAgent={selectedAgent} />
       </RuntimeContext.Provider>
     </SettingsProvider>
   )
@@ -160,5 +184,42 @@ describe('ProjBar 项目名就地重命名', () => {
     fireEvent.blur(input)
     expect(container.querySelector('.proj-name')?.textContent).toBe('original')
     expect(api.renameProject).not.toHaveBeenCalled()
+  })
+})
+
+describe('ProjBar 下个新会话标记（proj-next-agent）', () => {
+  it('selectedAgent 与 engine 不同时显示标记，文案含 Codex CLI，色点用 codex 色', () => {
+    const { container } = renderProjBar({ engine: 'claude', selectedAgent: 'codex' })
+    const mark = container.querySelector('.proj-next-agent') as HTMLElement | null
+    expect(mark).not.toBeNull()
+    expect(mark!.textContent).toContain('下个新会话用 Codex CLI')
+    const dot = mark!.querySelector('.pna-dot') as HTMLElement | null
+    expect(dot).not.toBeNull()
+    expect(dot!.style.background).toBe('var(--codex)')
+  })
+
+  it('selectedAgent 与 engine 相同时不显示标记', () => {
+    const { container } = renderProjBar({ engine: 'claude', selectedAgent: 'claude' })
+    expect(container.querySelector('.proj-next-agent')).toBeNull()
+  })
+
+  it('selectedAgent 为 null 时不显示标记', () => {
+    const { container } = renderProjBar({ engine: 'claude', selectedAgent: null })
+    expect(container.querySelector('.proj-next-agent')).toBeNull()
+  })
+
+  it('selectedAgent 未传时不显示标记', () => {
+    const { container } = renderProjBar({ engine: 'claude' })
+    expect(container.querySelector('.proj-next-agent')).toBeNull()
+  })
+
+  it('engine=codex, selectedAgent=claude 时显示标记，文案含 Claude Code，色点用 claude 色', () => {
+    const { container } = renderProjBar({ engine: 'codex', model: 'gpt-5.5', selectedAgent: 'claude' })
+    const mark = container.querySelector('.proj-next-agent') as HTMLElement | null
+    expect(mark).not.toBeNull()
+    expect(mark!.textContent).toContain('下个新会话用 Claude Code')
+    const dot = mark!.querySelector('.pna-dot') as HTMLElement | null
+    expect(dot).not.toBeNull()
+    expect(dot!.style.background).toBe('var(--claude)')
   })
 })

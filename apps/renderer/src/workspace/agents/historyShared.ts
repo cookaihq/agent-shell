@@ -32,10 +32,11 @@ export function rebuildShared(records: TranscriptRecord[], hooks?: RebuildHooks)
   let ord = 0
   for (const rec of records) {
     if (rec.type === 'user_prompt') {
-      const r = (rec.raw ?? {}) as { text?: string; attachments?: { name: string; path: string }[] }
+      const r = (rec.raw ?? {}) as { text?: string; attachments?: { name: string; path: string }[]; checkpointId?: string }
       const blocks: Block[] = [{ type: 'text', text: r.text ?? '' }]
       if (r.attachments && r.attachments.length > 0) blocks.push({ type: 'attachments', files: r.attachments })
-      out.push({ id: `${ord++}`, sessionId: '', role: 'user', blocks, createdAt: rec.ts })
+      // checkpointId（仅 claude 会话有；daemon 落记录时同源写入）→ 挂 user MessageDTO，支撑逐条 rewind；无则降级（前端禁用该条角标）
+      out.push({ id: `${ord++}`, sessionId: '', role: 'user', blocks, createdAt: rec.ts, ...(r.checkpointId ? { checkpointId: r.checkpointId } : {}) })
       continue
     }
     if (rec.type === 'assistant_blocks') {

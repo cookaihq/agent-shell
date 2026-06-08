@@ -11,12 +11,12 @@ function makeCtx(engine: 'claude' | 'codex' = 'claude', model = 'opus') {
   return runtime
 }
 
-function renderWithCtx(runtime: RuntimeState, dispatch = vi.fn()) {
+function renderWithCtx(runtime: RuntimeState, dispatch = vi.fn(), onAgentSwitch?: (engine: 'claude' | 'codex') => void) {
   const ctx: RuntimeContextValue = { runtime, dispatch }
   return render(
     <SettingsProvider>
       <RuntimeContext.Provider value={ctx}>
-        <RuntimeSwitcher />
+        <RuntimeSwitcher onAgentSwitch={onAgentSwitch} />
       </RuntimeContext.Provider>
     </SettingsProvider>
   )
@@ -115,6 +115,26 @@ describe('RuntimeSwitcher dispatch 交互', () => {
     const select = document.querySelector('.isw-select') as HTMLSelectElement
     fireEvent.change(select, { target: { value: 'sonnet' } })
     expect(dispatch).toHaveBeenCalledWith({ type: 'SET_MODEL', model: 'sonnet' })
+  })
+})
+
+describe('RuntimeSwitcher onAgentSwitch 代理段改走回调（会话区分流，Part B T5b）', () => {
+  it('传 onAgentSwitch 时点 codex → 调 onAgentSwitch(codex)、不 dispatch SET_AGENT', () => {
+    const dispatch = vi.fn()
+    const onAgentSwitch = vi.fn()
+    renderWithCtx(initialRuntime('claude', 'opus'), dispatch, onAgentSwitch)
+    fireEvent.click(document.querySelector('.isw-chip')!)
+    fireEvent.click(document.querySelector('[data-agent="codex"]')!)
+    expect(onAgentSwitch).toHaveBeenCalledWith('codex')
+    expect(dispatch).not.toHaveBeenCalledWith({ type: 'SET_AGENT', agent: 'codex' })
+  })
+
+  it('不传 onAgentSwitch（home Topbar 入口）时点 codex → 仍 dispatch SET_AGENT（fallback 不破）', () => {
+    const dispatch = vi.fn()
+    renderWithCtx(initialRuntime('claude', 'opus'), dispatch)   // 不传 onAgentSwitch
+    fireEvent.click(document.querySelector('.isw-chip')!)
+    fireEvent.click(document.querySelector('[data-agent="codex"]')!)
+    expect(dispatch).toHaveBeenCalledWith({ type: 'SET_AGENT', agent: 'codex' })
   })
 })
 

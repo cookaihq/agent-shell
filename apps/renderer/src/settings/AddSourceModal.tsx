@@ -8,6 +8,7 @@ import { IconButton } from '../ui/IconButton'
 interface Props {
   kind: 'folder' | 'git'
   existing?: SkillSourceDef | null  // 提供 = 编辑模式
+  groupId?: string                  // 落点分组（新增模式必传；编辑模式忽略）
   onSaved: (source: SkillSourceDef) => void
   onClose: () => void
 }
@@ -149,7 +150,7 @@ function AuthFields({
   )
 }
 
-export function AddSourceModal({ kind, existing, onSaved, onClose }: Props) {
+export function AddSourceModal({ kind, existing, groupId, onSaved, onClose }: Props) {
   const isEdit = !!existing
 
   // Folder state
@@ -213,6 +214,7 @@ export function AddSourceModal({ kind, existing, onSaved, onClose }: Props) {
             type: 'folder',
             name: derivedName,
             loc: trimPath,
+            groupId,
             updateMode: 'manual',
           } as Omit<SkillSourceDef, 'id' | 'sortIndex'>)
         }
@@ -252,6 +254,7 @@ export function AddSourceModal({ kind, existing, onSaved, onClose }: Props) {
             private: priv,
             user: priv ? user.trim() : undefined,
             token: priv ? token.trim() || undefined : undefined,
+            groupId,
             updateMode: 'manual',
           } as Omit<SkillSourceDef, 'id' | 'sortIndex'>)
         }

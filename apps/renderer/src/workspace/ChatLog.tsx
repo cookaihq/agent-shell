@@ -37,6 +37,11 @@ interface ChatLogProps {
   projectId?: string
   /** 当前会话 id（调试模式点 🐞 取原始记录用）。 */
   sessionId?: string
+  /** 点击 user 消息「回退到此」入口 → 触发 dryRun → confirm → 实跑流程（Workspace 持有）。
+   *  逐条回退：透传该条 user 消息的 checkpointId 作 rewindFiles 的 userMessageId（回退到本条前的文件状态）。 */
+  onRewind?: (checkpointId?: string) => void
+  /** rewind 入口是否禁用（会话已结束 / 非 claude 引擎 → 禁用）。 */
+  rewindDisabled?: boolean
 }
 
 /** 把扁平消息按「用户消息开启新一轮」分组：每轮 = 一条 user + 其后到下一条 user 之前的所有 assistant。
@@ -116,9 +121,13 @@ interface MessageViewProps {
   isLast?: boolean
   runStatus?: RunStatus
   onResume?: () => void
+  /** user 消息行「回退到此」入口回调（Workspace 持有 dryRun→confirm→实跑逻辑）；带该条 checkpointId 逐条回退。 */
+  onRewind?: (checkpointId?: string) => void
+  /** 入口禁用态（会话已结束 / 非 claude）。 */
+  rewindDisabled?: boolean
 }
 
-function MessageView({ message, engine, sliceState, onOpenCommand, onOpenDiff, onOpenFile, projectRoot, projectId, sessionId, isLast, runStatus, onResume }: MessageViewProps) {
+function MessageView({ message, engine, sliceState, onOpenCommand, onOpenDiff, onOpenFile, projectRoot, projectId, sessionId, isLast, runStatus, onResume, onRewind, rewindDisabled }: MessageViewProps) {
   const { debugMode } = useSettings()
   const [rawOpen, setRawOpen] = useState<unknown | null>(null)
 
@@ -132,6 +141,26 @@ function MessageView({ message, engine, sliceState, onOpenCommand, onOpenDiff, o
       .flatMap((b) => (b as { type: 'attachments'; files: { name: string; path: string }[] }).files)
     return (
       <div className="msg user">
+        {/* 「回退到此」角标：hover 显形，对齐 assistant .dbg-chip 形态。逐条回退：传本条 checkpointId 作 userMessageId。
+            禁用条件：会话级禁用（非 claude / 已结束）或本条无 checkpointId（历史旧会话未记 uuid → 不能精确回退到本条，禁用而非偷偷回退到最近）。 */}
+        {onRewind && (() => {
+          const chipDisabled = rewindDisabled || !message.checkpointId
+          return (
+            <button
+              className={`rewind-chip${chipDisabled ? ' disabled' : ''}`}
+              type="button"
+              title={
+                rewindDisabled ? '当前会话无法回退（仅限 claude 活跃会话）'
+                  : !message.checkpointId ? '此历史消息无检查点记录，无法精确回退'
+                    : '回退到此条消息前的文件状态'
+              }
+              disabled={chipDisabled}
+              onClick={() => { if (!chipDisabled) onRewind(message.checkpointId) }}
+            >
+              ↩ 回退到此
+            </button>
+          )
+        })()}
         {files.length > 0 && (
           <div className="user-attach">
             {files.map((f, i) => (
@@ -179,7 +208,7 @@ function MessageView({ message, engine, sliceState, onOpenCommand, onOpenDiff, o
   )
 }
 
-export function ChatLog({ messages, liveBlocks, sliceState, runStatus, liveProgress, engine = 'claude', onResume, onOpenCommand, onOpenFile, projectRoot, projectId, sessionId }: ChatLogProps) {
+export function ChatLog({ messages, liveBlocks, sliceState, runStatus, liveProgress, engine = 'claude', onResume, onOpenCommand, onOpenFile, projectRoot, projectId, sessionId, onRewind, rewindDisabled }: ChatLogProps) {
   // 编辑卡完整 diff 浮层（Issue 21）：点编辑卡在左侧会话区浮出
   const [diffModal, setDiffModal] = useState<DiffPayload | null>(null)
 
@@ -223,7 +252,7 @@ export function ChatLog({ messages, liveBlocks, sliceState, runStatus, liveProgr
         {groupTurns(allMessages).map((turn) => (
           <div className="chat-turn" key={turn.key}>
             {turn.messages.map((msg) => (
-              <MessageView key={msg.id} message={msg} engine={engine} sliceState={sliceState} onOpenCommand={onOpenCommand} onOpenDiff={setDiffModal} onOpenFile={onOpenFile} projectRoot={projectRoot} projectId={projectId} sessionId={sessionId} isLast={msg.id === lastMsgId} runStatus={runStatus} onResume={onResume} />
+              <MessageView key={msg.id} message={msg} engine={engine} sliceState={sliceState} onOpenCommand={onOpenCommand} onOpenDiff={setDiffModal} onOpenFile={onOpenFile} projectRoot={projectRoot} projectId={projectId} sessionId={sessionId} isLast={msg.id === lastMsgId} runStatus={runStatus} onResume={onResume} onRewind={msg.role === 'user' ? onRewind : undefined} rewindDisabled={rewindDisabled} />
             ))}
           </div>
         ))}

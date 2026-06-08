@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { AutomationSchedule, AutomationTarget, CreateAutomationReq, AutomationDTO, AutomationRunDTO, SessionOrigin } from '../dto'
+import { AutomationSchedule, AutomationTriggerDef, AutomationTarget, CreateAutomationReq, AutomationDTO, AutomationRunDTO, SessionOrigin, triggersSummary } from '../dto'
 
 describe('AutomationSchedule', () => {
   it('接受四档', () => {
@@ -19,6 +19,17 @@ describe('AutomationSchedule', () => {
   })
 })
 
+describe('AutomationTriggerDef', () => {
+  it('四档时间 + startup 都接受', () => {
+    expect(AutomationTriggerDef.safeParse({ kind: 'startup' }).success).toBe(true)
+    expect(AutomationTriggerDef.safeParse({ kind: 'hourly', minute: 30 }).success).toBe(true)
+    expect(AutomationTriggerDef.safeParse({ kind: 'weekly', time: '10:00', timezone: 'UTC', weekday: 0 }).success).toBe(true)
+  })
+  it('未知 kind 拒绝', () => {
+    expect(AutomationTriggerDef.safeParse({ kind: 'cron', expr: '* * * * *' }).success).toBe(false)
+  })
+})
+
 describe('AutomationTarget', () => {
   it('create_each_run / reuse', () => {
     expect(AutomationTarget.safeParse({ mode: 'create_each_run' }).success).toBe(true)
@@ -28,18 +39,32 @@ describe('AutomationTarget', () => {
 })
 
 describe('CreateAutomationReq', () => {
-  it('默认值：categories=[] enabled=true', () => {
+  it('默认值：category/tags/requires=[] executor=agent enabled=true', () => {
     const r = CreateAutomationReq.parse({
       name: 'x', prompt: 'p', engine: 'claude', model: 'opus',
       permission: 'bypassPermissions',
-      schedule: { kind: 'daily', time: '09:00', timezone: 'Asia/Shanghai' },
+      triggers: [{ kind: 'daily', time: '09:00', timezone: 'Asia/Shanghai' }],
       target: { mode: 'create_each_run' },
     })
-    expect(r.categories).toEqual([])
+    expect(r.category).toEqual([])
+    expect(r.tags).toEqual([])
+    expect(r.requires).toEqual([])
+    expect(r.executor).toBe('agent')
     expect(r.enabled).toBe(true)
   })
+  it('triggers 空列表拒绝（无触发器的任务非法）', () => {
+    expect(CreateAutomationReq.safeParse({ name: 'x', prompt: 'p', engine: 'claude', model: 'opus', permission: 'x', triggers: [], target: { mode: 'create_each_run' } }).success).toBe(false)
+  })
   it('缺 name 拒绝', () => {
-    expect(CreateAutomationReq.safeParse({ prompt: 'p', engine: 'claude', model: 'opus', permission: 'x', schedule: { kind: 'hourly', minute: 0 }, target: { mode: 'create_each_run' } }).success).toBe(false)
+    expect(CreateAutomationReq.safeParse({ prompt: 'p', engine: 'claude', model: 'opus', permission: 'x', triggers: [{ kind: 'hourly', minute: 0 }], target: { mode: 'create_each_run' } }).success).toBe(false)
+  })
+})
+
+describe('triggersSummary', () => {
+  it('startup→「启动时」，单时间档 == scheduleSummary，多触发器用「 · 」拼', () => {
+    expect(triggersSummary([{ kind: 'startup' }])).toBe('启动时')
+    expect(triggersSummary([{ kind: 'weekly', time: '10:00', timezone: 'Asia/Shanghai', weekday: 1 }])).toBe('每周一 10:00 · 上海')
+    expect(triggersSummary([{ kind: 'startup' }, { kind: 'daily', time: '09:00', timezone: 'Asia/Shanghai' }])).toBe('启动时 · 每天 09:00 · 上海')
   })
 })
 
@@ -47,7 +72,9 @@ describe('AutomationDTO / AutomationRunDTO / SessionOrigin', () => {
   it('AutomationDTO 形状', () => {
     const dto = {
       id: 'a1', name: 'n', prompt: 'p', engine: 'claude', model: 'opus', permission: 'bypassPermissions',
-      categories: ['监控'], schedule: { kind: 'hourly', minute: 5 }, target: { mode: 'create_each_run' },
+      category: ['监控'], tags: ['紧急'], requires: [{ kind: 'env', name: 'TOKEN' }],
+      triggers: [{ kind: 'startup' }, { kind: 'hourly', minute: 5 }], executor: 'agent',
+      target: { mode: 'create_each_run' },
       enabled: true, nextRunAt: 123, createdAt: 1, updatedAt: 2, lastRun: null,
     }
     expect(AutomationDTO.safeParse(dto).success).toBe(true)

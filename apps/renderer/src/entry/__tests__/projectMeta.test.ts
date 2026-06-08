@@ -3,7 +3,7 @@ import { KANBAN_ORDER, SORTS, filterProjects, glyph, relativeTime, sortProjects,
 import type { ProjectDTO } from '../../api/types'
 
 const mk = (id: string, name: string, createdAt: number, status: ProjectDTO['status']): ProjectDTO =>
-  ({ id, name, path: '/' + id, createdAt, status, engine: 'claude' })
+  ({ id, name, path: '/' + id, createdAt, status, engine: 'claude', selectedAgent: null })
 
 describe('glyph', () => {
   it('取词首字母（最多2个）大写', () => {

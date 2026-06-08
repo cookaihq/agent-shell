@@ -7,12 +7,15 @@ import { augmentedPath } from './runtimes/shellPath'
 process.env.PATH = augmentedPath(process.env.PATH)
 
 // 可执行 daemon 入口：被 desktop 主进程用 ELECTRON_RUN_AS_NODE spawn。
-// webDir / namespace 经环境变量注入；端口 0 随机，真实 URL 经 sidecar 发布。
+// webDir / namespace / builtinSkillsDir 经环境变量注入；端口 0 随机，真实 URL 经 sidecar 发布。
 const webDir = process.env.AGENT_SHELL_WEB_DIR || undefined
 const namespace = process.env.AGENT_SHELL_NAMESPACE || 'default'
 const authSecret = process.env.AGENT_SHELL_AUTH_SECRET || undefined
+const builtinSkillsDir = process.env.AGENT_SHELL_BUILTIN_SKILLS_DIR || undefined
+const builtinAutomationsDir = process.env.AGENT_SHELL_BUILTIN_AUTOMATIONS_DIR || undefined
+const automationMcpEntry = process.env.AGENT_SHELL_AUTOMATION_MCP_ENTRY || undefined
 
-const handle = await boot({ port: 0, webDir, namespace, authSecret })
+const handle = await boot({ port: 0, webDir, namespace, authSecret, builtinSkillsDir, builtinAutomationsDir, automationMcpEntry, seedDefaults: true })
 // stderr 打一行便于排障；真实地址以 sidecar 为准（不靠解析 stdout）。
 console.error(`[daemon-entry] ready url=${handle.daemon.url} sidecar=${handle.sidecar.socketPath}`)
 

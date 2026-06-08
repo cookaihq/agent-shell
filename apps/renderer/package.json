@@ -10,6 +10,8 @@
   },
   "dependencies": {
     "@agent-shell/contracts": "workspace:*",
+    "@fontsource/jetbrains-mono": "^5.2.8",
+    "@fontsource/source-serif-4": "^5.2.9",
     "@tanstack/react-virtual": "^3.14.2",
     "diff": "^8.0.4",
     "react": "^18.3.1",

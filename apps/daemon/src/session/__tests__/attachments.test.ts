@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest'
 import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path'
-import { resolveAttachments, buildPromptWithAttachments } from '../attachments'
+import { resolveAttachments, buildPromptWithAttachments, appendCurrentFile } from '../attachments'
 
 let cleanup: string[] = []
 afterEach(() => { for (const d of cleanup) fs.rmSync(d, { recursive: true, force: true }); cleanup = [] })
@@ -51,5 +51,22 @@ describe('buildPromptWithAttachments — preamble', () => {
   })
   it('无附件 → 原文不变', () => {
     expect(buildPromptWithAttachments('你好', [])).toBe('你好')
+  })
+})
+
+describe('appendCurrentFile — 当前文件独立块', () => {
+  it('有 activeFile → 末尾追加 <current_file> 块', () => {
+    expect(appendCurrentFile('帮我看下', 'src/foo.ts'))
+      .toBe('帮我看下\n\n<current_file>src/foo.ts</current_file>')
+  })
+  it('与附件 preamble 并存 → current_file 在最后、各自分行', () => {
+    const withAttach = buildPromptWithAttachments('q', [{ name: 'a.png', path: 'attachments/a.png' }])
+    expect(appendCurrentFile(withAttach, 'src/b.ts'))
+      .toBe('q\n\nAttached project files: `attachments/a.png`\n\n<current_file>src/b.ts</current_file>')
+  })
+  it('null / undefined / 空串 → 原文不变', () => {
+    expect(appendCurrentFile('你好', null)).toBe('你好')
+    expect(appendCurrentFile('你好', undefined)).toBe('你好')
+    expect(appendCurrentFile('你好', '')).toBe('你好')
   })
 })

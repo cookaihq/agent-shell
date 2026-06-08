@@ -38,11 +38,21 @@ interface MentionPopProps {
   activeIndex: number
   /** mouseDown 时调用，传 item 索引；调用方负责 choose(ta, idx) */
   onChoose: (idx: number) => void
+  /**
+   * 斜杠命令面板顶部 sticky 搜索框：当前过滤词（不含前缀 /）。
+   * 仅 is-cmd 态显示；只读镜像，不触发第二过滤源。
+   */
+  query?: string
+  /**
+   * 搜索框被点击/聚焦时把焦点送回 composer textarea（可选）。
+   * V1 只读镜像：点击时 focus 回 composer，不让搜索框抢焦点。
+   */
+  onFocusComposer?: () => void
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
-export function MentionPop({ open, items, activeIndex, onChoose }: MentionPopProps) {
+export function MentionPop({ open, items, activeIndex, onChoose, query, onFocusComposer }: MentionPopProps) {
   // 渲染分组：同组仅第一次输出 group header
   const rows: JSX.Element[] = []
   let lastGroup: string | undefined = undefined
@@ -82,6 +92,24 @@ export function MentionPop({ open, items, activeIndex, onChoose }: MentionPopPro
   const isCmd = items.length > 0 && items[0].icon === 'cmd'
   return (
     <div className={`mention-pop${isCmd ? ' is-cmd' : ''}`} hidden={!open}>
+      {/* 斜杠命令面板顶部吸附搜索框（Task 6.6.2）：只读镜像 + 点击送焦点回 composer */}
+      {isCmd && (
+        <div className="mention-search-wrap">
+          <input
+            className="mention-search"
+            type="text"
+            value={query ?? ''}
+            readOnly
+            placeholder="搜索命令…"
+            tabIndex={-1}
+            onMouseDown={(e) => {
+              // mouseDown 阶段 preventDefault 防止 textarea 失焦（与 mention-item 同款）
+              e.preventDefault()
+              onFocusComposer?.()
+            }}
+          />
+        </div>
+      )}
       {rows}
     </div>
   )

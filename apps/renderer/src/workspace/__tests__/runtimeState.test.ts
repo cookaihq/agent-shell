@@ -42,9 +42,10 @@ describe('initialRuntime（中立槽）', () => {
     expect(rt.model).toBe('opus')   // 'opus' 在 claude 列表 value 里，保留不洗
   })
 
-  it('未知 model 回退到列表第一个 value', () => {
-    const rt = initialRuntime('claude', 'Claude Opus 4.8')  // 旧显示名不在 value 列表 → 回退
-    expect(rt.model).toBe(CLI_MODELS.claude[0].value)
+  it('非静态 model（旧显示名或自定义 Provider model）→ 信任传入，不再回退（P2）', () => {
+    // 新语义：传入非空 model 一律保留（来自会话 DB 或 active provider 种子）
+    const rt = initialRuntime('claude', 'Claude Opus 4.8')
+    expect(rt.model).toBe('Claude Opus 4.8')
   })
 
   it('claude 初始中立槽', () => {
@@ -136,6 +137,15 @@ describe('per-agent 投影 bag（Issue 13：切 CLI 复用上次档位）', () =
     const fresh = initialRuntime('claude', 'opus')
     expect(fresh.permissionMode).toBe('acceptEdits')
     expect(fresh.reasoning).toBe('low')
+  })
+})
+
+describe('initialRuntime model 信任传入值', () => {
+  it('保留传入的非静态 model（自定义 Provider model 不被洗）', () => {
+    expect(initialRuntime('claude', 'relay-opus').model).toBe('relay-opus')
+  })
+  it('传入空 model → 回落静态首项', () => {
+    expect(initialRuntime('claude', '').model).toBe('default')
   })
 })
 

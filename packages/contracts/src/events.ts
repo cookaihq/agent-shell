@@ -153,6 +153,60 @@ export const SubagentEvent = z.object({
   skipTranscript: z.boolean().optional(),
 })
 
+// ── codex 子代理（多 thread fanout）事件（codex 切片私有，spec §4.2/§4.5/§6） ──
+//
+// 与 claude SubagentEvent 的本质区别（§4.3 明令不复用 parentToolUseId）：
+//   - claude 子代理 = 单流，靠 `parentToolUseId`（派生它的 Task tool_use id）把内容归到子代理；
+//     子内容仍走共享 message/thinking/tool_use 事件（带 parentToolUseId）混在主流里。
+//   - codex 子代理 = **独立 thread**（多 thread 并发），靠 **`threadId`** 归属；子线程内容**不**走共享事件，
+//     全部封进本 codex 私有事件（phase='item'），不污染主时间线。主线程内容仍走共享 AgentEvent（无 threadId 标签）。
+//
+// 一个 phase 标签事件覆盖子代理整生命周期（对账 app-server collabAgentToolCall + 子线程 item 通知）：
+//   - 'spawned' ← spawnAgent item/completed：threadId(=receiverThreadIds[0]) + parentThreadId(=senderThreadId) + task(=prompt)
+//   - 'status'  ← agentsStates[threadId].status（pendingInit→running→completed/interrupted/errored/shutdown）
+//   - 'item'    ← 子线程 item/completed（reasoning/message/commandExecution/fileChange）→ 归一为一个 mini-timeline 块，带 threadId
+//   - 'report'  ← wait item/completed 携带的 agentsStates[threadId].message（子代理给父的汇报）
+//   - 'closed'  ← closeAgent item/completed
+//   - 'wait'    ← wait item/started|completed：主代理等待编排态（驱动 cxp-wait「主代理等待中」徽章），parentThreadId + waiting
+//
+// 归属键永远是 threadId（spawned 的子 threadId / wait 的 parentThreadId）。中立工具种类沿用 NeutralTool。
+
+/** codex 子线程 mini-timeline 的一个块（message/thinking/tool_use/tool_result 之一；归一自子线程 item 通知）。
+ *  与中立 Block 同构子集，便于 renderer 直接喂 renderTimeline；归属在外层事件的 threadId。 */
+// message 的 streaming 语义对齐共享 MessageEvent：true=逐字流式中的累计全文（reducer 替换当前流式块），
+// false/缺省=定格全文（追加/落定）。子线程 agentMessage delta 累计 → streaming:true；item/completed → 定格。
+export const CodexSubItem = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('message'), text: z.string(), streaming: z.boolean().optional() }),
+  z.object({ kind: z.literal('thinking'), text: z.string() }),
+  z.object({ kind: z.literal('tool_use'), id: z.string(), name: z.string(), input: z.unknown(), tool: NeutralTool.optional() }),
+  z.object({ kind: z.literal('tool_result'), toolUseId: z.string(), ok: z.boolean(), content: z.string() }),
+])
+export type CodexSubItem = z.infer<typeof CodexSubItem>
+
+/** codex 子代理状态机（agentsStates[threadId].status，probe §5）。 */
+export const CodexSubStatus = z.enum(['pendingInit', 'running', 'completed', 'interrupted', 'errored', 'shutdown'])
+export type CodexSubStatus = z.infer<typeof CodexSubStatus>
+
+export const CodexSubagentEvent = z.object({
+  type: z.literal('codex_subagent'),
+  phase: z.enum(['spawned', 'status', 'item', 'report', 'closed', 'wait']),
+  /** 归属 thread：spawned/status/item/report/closed = 子 threadId；wait = 主(发起)threadId。 */
+  threadId: z.string(),
+  /** 父 thread（= senderThreadId）：spawned/wait 带；renderer 据此把子代理归到对应父代理组。 */
+  parentThreadId: z.string().optional(),
+  /** 子代理任务（= spawnAgent.prompt 全文，子代理「身份」靠它标识，无角色名，probe §4）。spawned 带。 */
+  task: z.string().optional(),
+  /** 子代理状态（status 相）。 */
+  status: CodexSubStatus.optional(),
+  /** 子线程 mini-timeline 块（item 相）。 */
+  item: CodexSubItem.optional(),
+  /** 子代理汇报文本（report 相，= wait 完成时的 agentsStates[threadId].message）。 */
+  report: z.string().optional(),
+  /** 主代理是否正在 wait 阻塞（wait 相：started→true / completed→false）；驱动 cxp-wait 徽章。 */
+  waiting: z.boolean().optional(),
+})
+export type CodexSubagentEvent = z.infer<typeof CodexSubagentEvent>
+
 /** 共享生命周期 + 中立内容事件（跨 Agent 共享；切片私有事件不在内）。renderer 按 engine 取「这个 ∪ 切片 schema」safeParse。 */
 export const SharedLifecycleEvent = z.discriminatedUnion('type', [
   MessageEvent, ThinkingEvent, ToolUseEvent, ToolResultEvent,
@@ -175,6 +229,7 @@ export const AgentEvent = z.discriminatedUnion('type', [
   PermissionResolvedEvent,
   StructuredOutputEvent,
   SubagentEvent,
+  CodexSubagentEvent,
   CommandsChangedEvent,
 ])
 export type AgentEvent = z.infer<typeof AgentEvent>

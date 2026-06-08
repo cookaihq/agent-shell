@@ -15,10 +15,14 @@ export function makeConfigStore(file: string, defaults: AppConfig): ConfigStore 
       return {
         projectsDir: typeof raw.projectsDir === 'string' ? raw.projectsDir : defaults.projectsDir,
         skillsDir: typeof raw.skillsDir === 'string' ? raw.skillsDir : defaults.skillsDir,
+        automationsDir: typeof raw.automationsDir === 'string' ? raw.automationsDir : defaults.automationsDir,
         debugMode: typeof raw.debugMode === 'boolean' ? raw.debugMode : defaults.debugMode,
         engineModels: (raw.engineModels && typeof raw.engineModels === 'object')
           ? Object.fromEntries(Object.entries(raw.engineModels).filter(([, v]) => typeof v === 'string')) as Record<string, string>
           : defaults.engineModels,
+        modelAliases: (raw.modelAliases && typeof raw.modelAliases === 'object') ? raw.modelAliases : defaults.modelAliases,
+        seededRecommendedGroup: typeof raw.seededRecommendedGroup === 'boolean' ? raw.seededRecommendedGroup : defaults.seededRecommendedGroup,
+        seededDefaultSecrets: typeof raw.seededDefaultSecrets === 'boolean' ? raw.seededDefaultSecrets : defaults.seededDefaultSecrets,
       }
     } catch { return { ...defaults } }
   }

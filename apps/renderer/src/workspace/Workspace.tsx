@@ -26,7 +26,11 @@ import { getSlice } from './agents/registry'
 import { Composer } from './Composer'
 import { PendingCard } from './PendingCard'
 import { FileWorkspace } from './FileWorkspace'
-import type { SessionDTO, UsageDTO, Engine, SlashCommand } from '../api/types'
+import { useReminderTrigger } from '../hooks/useReminderTrigger'
+import type { SessionDTO, UsageDTO, Engine, SlashCommand, AuthStatusResp } from '../api/types'
+import { buildRewindConfirmText } from './rewind'
+import { useSettings } from '../settings/SettingsContext'
+import { shouldShowAuthBanner } from './authBanner'
 
 interface WorkspaceProps {
   projectId: string
@@ -48,7 +52,11 @@ interface WorkspaceProps {
   onRename: (name: string) => void           // 改名回传 → AppNav 乐观更新 projects → 页签标题同步
   onPatchSession: (id: string, patch: { title?: string; pinned?: boolean }) => void  // 会话改名/置顶 → AppNav 乐观回写 sessions → 列表/页签同步
   onRuntimeChange?: (id: string, cfg: SessionRuntimeCfg) => void  // 运行时档位变化 → AppNav 同步 session 快照（切回会话保持档位，不回退）
+  // D5 切代理分流：未发送会话「原地变身」（换本会话 engine/model + 项目默认）；已发送会话只设项目默认（不动当前会话）。
+  onChangeSessionEngine: (sessionId: string, projectId: string, engine: Engine) => void
+  onSetProjectDefault: (projectId: string, engine: Engine) => void
   onDeleteSession: (id: string) => void      // 真删除会话（连同对话历史，不可恢复）→ AppNav 删库 + 移除 tab/列表 + 处理 active/最后一个边界
+  selectedAgent?: Engine | null              // D5 视觉标记：项目下个新会话用的引擎（透传给 ProjBar）
 }
 
 export function Workspace(p: WorkspaceProps) {
@@ -61,6 +69,17 @@ export function Workspace(p: WorkspaceProps) {
   const sess0 = p.sessions.find((s) => s.id === p.sessionId)
   const [runtime, rtDispatch] = useRuntimeReducer(p.engine, p.model, { permissionMode: sess0?.permissionMode, effort: sess0?.effort })
   const { containerRef, handleProps, cols } = useSplitDrag()
+  const { openSettings } = useSettings()
+
+  // Task 6.1：会话区 claude 未登录引导 banner。
+  // 取凭证状态（claude 活动来源 = 本机 CLI 登录但本机未登录 → 引擎无可用凭证 → 引导去登录）；
+  // dismiss 为本会话内 state（重挂会复现，无需持久化）。引擎切换时重取（切到 claude 重新判定）。
+  const [authStatus, setAuthStatus] = useState<AuthStatusResp | null>(null)
+  const [bannerDismissed, setBannerDismissed] = useState(false)
+  useEffect(() => {
+    api.getAuthStatus().then(setAuthStatus).catch(() => {})
+  }, [p.engine])
+  const showBanner = shouldShowAuthBanner(p.engine, authStatus, bannerDismissed)
 
   // Task 18：usage 初值（api.usage 加载）+ liveUsage 实时叠加
   // costUsd 初始 undefined：api.usage 的 COALESCE(SUM,0) 对 codex 会话返回 0（无成本数据），
@@ -101,7 +120,8 @@ export function Workspace(p: WorkspaceProps) {
       // §8：daemon 回吐原始 records，由当前会话 engine 的切片 historyService 重建成 MessageDTO[]
       // （历史与实时走同一套切片解析；claude 切片含 msg_id 提取，codex 切片仅共享骨架）。
       const rebuilt = getSlice(p.engine).historyService.rebuildBlocks(m.records)
-      dispatch({ type: 'loadHistory', messages: rebuilt, running: st.running, status: st.status, slice: { reduce: slice.reduce, initSliceState: slice.initSliceState } })
+      // P5c：把原始 records + 切片 rebuildSliceState 一并透传 → chatReducer 还原切片私有累计态（codex 子代理重载===live）。
+      dispatch({ type: 'loadHistory', messages: rebuilt, running: st.running, status: st.status, records: m.records, slice: { reduce: slice.reduce, initSliceState: slice.initSliceState, rebuildSliceState: slice.historyService.rebuildSliceState } })
       // costUsd=0 来自 COALESCE(SUM,0)，对 codex 会话（无成本数据）与「真正 0 成本」无法区分；
       // 保守处理：0 视为「无成本数据」→ undefined，避免 codex 会话错误显示「≈ $0.00」费用行。
       setBaseUsage({ ...u, costUsd: u.costUsd ? u.costUsd : undefined })
@@ -110,14 +130,36 @@ export function Workspace(p: WorkspaceProps) {
     return () => { off = true }
   }, [p.sessionId, p.engine])
 
+  // 提醒（Reminders）触发：按事件 + 渠道 + 失焦门控提醒。fire 稳定，内部经 ref 读最新配置/命名（防 stale 闭包）。
+  // 会话名取当前会话标题（sessions 快照）；无则回落「会话」。
+  const sessionTitle = p.sessions.find((s) => s.id === p.sessionId)?.title ?? '会话'
+  const fireReminder = useReminderTrigger({
+    projectId: p.projectId,
+    sessionId: p.sessionId,
+    projectName: p.projectName,
+    sessionName: sessionTitle,
+  })
+
   // SSE 实时增量（attached=true 后才开连接）。slice 透传切片私有 reducer（subagent 等事件累计进 sliceState）。
   // P1：commands_changed 不是聊天内容事件 → 单独截下更新 liveCommands（→ Composer 覆盖命令源），不进 chatReducer。
   useAgentStream(p.sessionId, (ev) => {
     if (ev.type === 'commands_changed') { setLiveCommands(ev.commands); return }
     dispatch({ type: 'event', ev, slice: { reduce: slice.reduce, initSliceState: slice.initSliceState } })
+    fireReminder(ev)   // 触发提醒（attention/complete/failed，aborted 不响）；自身按 config.enabled 等门控判定
   }, attached, p.engine)
 
   const running = chat.runStatus === 'running'
+
+  // D5 切代理分流：会话是否「未发送」（无任何消息）。optimisticUser/loadHistory 都进 chat.messages，
+  // 故 length===0 即空会话（中立判定，不认引擎）。
+  const sessionEmpty = chat.messages.length === 0
+  // RuntimeSwitcher 代理段点击改走此回调（home Topbar 不传 → 仍走 SET_AGENT，Task 4 行为不变）。
+  // 与会话当前引擎相同 → no-op；未发送 → 变身；已发送 → 只设项目默认。条件全用变量比变量 / 消息长度（零字面引擎分支）。
+  const onAgentSwitch = useCallback((newEngine: Engine) => {
+    if (newEngine === p.engine) return
+    if (sessionEmpty) p.onChangeSessionEngine(p.sessionId, p.projectId, newEngine)
+    else p.onSetProjectDefault(p.projectId, newEngine)
+  }, [sessionEmpty, p.engine, p.sessionId, p.projectId, p.onChangeSessionEngine, p.onSetProjectDefault])
 
   // Task 18：合成 usage = baseUsage + liveUsage（实时叠加，SSE usage 事件更新 liveUsage）
   // Task 1.5：
@@ -143,13 +185,15 @@ export function Workspace(p: WorkspaceProps) {
 
   // 中立运行时档位 → daemon：无脑 POST 中立槽，daemon 按 run.kind 自取舍（claude 热切、codex no-op）。
   // 命名映射：renderer 槽 reasoning → daemon 字段 effort（daemon 读 runtime.effort）。
-  const runtimePayload = () => ({ permissionMode: runtime.permissionMode, effort: runtime.reasoning, model: runtime.model })
+  // modeSelections（slot→值）整袋摊平进 payload：codex 切片填 {sandbox,approval}（slot 名即 daemon 字段名），
+  // claude 切片不填该袋（undefined）→ 自然不带这俩字段。外壳零引擎分支，由切片填没填中立槽决定带不带。
+  const runtimePayload = () => ({ permissionMode: runtime.permissionMode, effort: runtime.reasoning, model: runtime.model, ...(runtime.modeSelections ?? {}) })
 
-  const submit = (text: string, contextFiles: string[] = []) => {
+  const submit = (text: string, contextFiles: string[] = [], activeFile?: string | null) => {
     // 乐观渲染：带上附件 → 立刻显示 📎 N 个附件（name 取 basename 作预览，权威以落库为准）
     const attachments = contextFiles.map((path) => ({ name: path.split(/[\\/]/).filter(Boolean).pop() ?? path, path }))
     dispatch({ type: 'optimisticUser', text, attachments })
-    void api.submit(p.sessionId, text, contextFiles, runtimePayload())
+    void api.submit(p.sessionId, text, contextFiles, runtimePayload(), activeFile)
   }
 
   // 运行中 active 档位变化 → 立即 POST /runtime 中立槽。daemon applyRuntimeConfig 按 run.kind 取舍：
@@ -157,7 +201,8 @@ export function Workspace(p: WorkspaceProps) {
   useEffect(() => {
     if (!running) return
     void api.setRuntime(p.sessionId, runtimePayload())
-  }, [runtime.permissionMode, runtime.reasoning, runtime.model])
+    // modeSelections 序列化进依赖：codex 运行中切 sandbox/approval 也触发 POST（claude 该袋恒 undefined → 不影响）。
+  }, [runtime.permissionMode, runtime.reasoning, runtime.model, JSON.stringify(runtime.modeSelections ?? {})])
 
   // Issue 13：运行时档位每次变化都缓存到 localStorage，供下个新会话/新项目复用（与 DB 会话级存档互补）
   useEffect(() => { saveLastRuntime(runtime) }, [runtime])
@@ -191,6 +236,25 @@ export function Workspace(p: WorkspaceProps) {
     })
   }
 
+  // 文件检查点回退（逐条）：dryRun 预览 → window.confirm 确认 → 实跑。
+  // 语义：回退到 checkpointId 这条 user 消息发出前的文件状态（checkpointId = 该条 prompt 的 SDKUserMessage uuid，
+  //   daemon 落 transcript 时同源记录、重建挂到 MessageDTO.checkpointId）。每条 user 消息各传各自的 checkpointId。
+  // 禁用条件：切片不支持 fileRewind（codex 无检查点；claude 支持）；无 checkpointId 的历史旧消息由 ChatLog 角标层禁用。
+  // claude 会话是否有活跃检查点由 dryRun 返回的 canRewind 决定——不在此处猜测，让 daemon 说了算。
+  const rewindDisabled = !slice.supportsFileRewind
+  const handleRewind = useCallback(async (checkpointId?: string) => {
+    try {
+      const preview = await api.rewind(p.sessionId, checkpointId, true)
+      const { ok, text } = buildRewindConfirmText(preview)
+      if (!ok) { window.alert(text); return }
+      if (!window.confirm(text)) return
+      await api.rewind(p.sessionId, checkpointId, false)
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e)
+      window.alert(`回退失败：${msg}`)
+    }
+  }, [p.sessionId])
+
   return (
     <RuntimeContext.Provider value={{ runtime, dispatch: rtDispatch }}>
       <AppShell chrome={p.chrome}>
@@ -201,6 +265,8 @@ export function Workspace(p: WorkspaceProps) {
           sessionId={p.sessionId}
           onBack={p.onBack}
           onRename={p.onRename}
+          onAgentSwitch={onAgentSwitch}
+          selectedAgent={p.selectedAgent}
         />
         <div
           className="split"
@@ -209,6 +275,15 @@ export function Workspace(p: WorkspaceProps) {
         >
           {/* chat 区 */}
           <div className="chat">
+            {/* Task 6.1：claude 未登录引导 banner（仅 claude·活动来源 cli-login 且本机未登录时显示） */}
+            {showBanner && (
+              <div className="auth-banner" data-eng="claude">
+                <span className="ab-ic">⚠️</span>
+                <span className="ab-txt"><b>Claude Code</b> 未登录，无法运行。请先登录。</span>
+                <button className="ab-go" type="button" onClick={() => openSettings('exec')}>去登录</button>
+                <button className="ab-x" type="button" aria-label="忽略" title="忽略" onClick={() => setBannerDismissed(true)}>×</button>
+              </div>
+            )}
             <ChatHeader
               sessions={p.sessions}
               openSessionIds={p.openSessionIds}
@@ -240,6 +315,8 @@ export function Workspace(p: WorkspaceProps) {
               projectRoot={p.projectPath}
               projectId={p.projectId}
               sessionId={p.sessionId}
+              onRewind={handleRewind}
+              rewindDisabled={rewindDisabled}
             />
             {/* SDK 交互回路：聊天内授权卡 / AskUserQuestion 选择卡（挂起时显示，回执后由 daemon 移除） */}
             <PendingCard reqs={chat.pendingRequests} onDecision={onDecision} />

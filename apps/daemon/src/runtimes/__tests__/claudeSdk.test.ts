@@ -272,6 +272,31 @@ describe('runClaudeSdkTurn — 控制方法与传参', () => {
     await h.handle.done
   })
 
+  it('显式 checkpointId（逐条 rewind）：首轮 opts.checkpointId / pushUser(.,.,checkpointId) → SDKUserMessage.uuid 与 lastCheckpointId 用该值，不自铸', async () => {
+    // 首轮带显式 checkpointId：盖过默认 genCheckpointId（验证宿主可指定，使其与 transcript user_prompt 记录同源）
+    const h = harness({ checkpointId: 'ck-A', genCheckpointId: () => 'AUTO' })
+    expect(h.handle.lastCheckpointId()).toBe('ck-A')
+    const drain = (h.fake.getPromptIterable() as AsyncIterable<any>)[Symbol.asyncIterator]()
+    const first = await drain.next()
+    expect(first.value.uuid).toBe('ck-A')                 // SDKUserMessage 带宿主指定的 uuid = 文件检查点 id
+    h.handle.pushUser('next', undefined, 'ck-B')          // 续投显式 checkpointId
+    expect(h.handle.lastCheckpointId()).toBe('ck-B')
+    const second = await drain.next()
+    expect(second.value.uuid).toBe('ck-B')
+    h.fake.close()
+    await h.handle.done
+  })
+
+  it('未传 checkpointId → 回退自铸（back-compat）', async () => {
+    let n = 0
+    const h = harness({ genCheckpointId: () => `auto-${++n}` })
+    expect(h.handle.lastCheckpointId()).toBe('auto-1')
+    h.handle.pushUser('next')                              // 无显式 → 自铸 auto-2
+    expect(h.handle.lastCheckpointId()).toBe('auto-2')
+    h.fake.close()
+    await h.handle.done
+  })
+
   it('supportedModels/rewindFiles 委托给 Query', async () => {
     const h = harness()
     const models = await h.handle.supportedModels()
@@ -300,5 +325,12 @@ describe('runClaudeSdkTurn — 控制方法与传参', () => {
     const te = h.events.find((e) => e.type === 'turn_end') as any
     expect(te.sdkMessageId).toBe('msg_last')
     expect(te.sdkUuid).toBe('uL')
+  })
+
+  it('createAutomation 提供 → mcpServers 含 agent-shell server（gating 放行）', () => {
+    const h = harness({ createAutomation: async () => ({ content: [{ type: 'text' as const, text: 'ok' }] }) } as any)
+    const o = h.fake.getOptions() as any
+    expect(o.mcpServers).toBeTruthy()
+    expect(o.mcpServers['agent-shell']).toBeTruthy()
   })
 })

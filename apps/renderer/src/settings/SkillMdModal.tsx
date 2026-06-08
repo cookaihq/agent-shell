@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api/client'
-import type { ProbedSkill, SkillSourceDef } from '../api/types'
+import type { EntityRequirement, ProbedSkill, SkillSourceDef } from '../api/types'
 import { IconClose } from '../ui/icons'
 import { IconButton } from '../ui/IconButton'
+import { ConfigPanel } from './ConfigPanel'
 
 interface Props {
   source: SkillSourceDef
@@ -22,8 +23,19 @@ export function SkillMdModal({ source, skill, allInLibSkills, onToggled, onClose
   const [loadErr, setLoadErr] = useState(false)
   // 本地乐观映射 inLib：父组件 reload 会重建并重挂，但开关瞬时反馈用本地态
   const [inLib, setInLib] = useState(skill.inLib)
+  const [req, setReq] = useState<EntityRequirement | undefined>(undefined)
 
   useEffect(() => { setInLib(skill.inLib) }, [skill.inLib])
+
+  useEffect(() => {
+    let alive = true
+    api.listEntityRequirements().then(r => {
+      if (!alive) return
+      const key = 'skill:' + (skill.effectiveName ?? skill.name)
+      setReq(r.requirements[key])
+    }).catch(() => { /* noop */ })
+    return () => { alive = false }
+  }, [skill.effectiveName, skill.name])
 
   useEffect(() => {
     let alive = true
@@ -64,7 +76,7 @@ export function SkillMdModal({ source, skill, allInLibSkills, onToggled, onClose
 
   return (
     <div className="modal-backdrop open" onClick={handleBackdrop}>
-      <div className="skill-md-modal" role="dialog" aria-label={skill.name}>
+      <div className="skill-md-modal skill-md-modal--cfg" role="dialog" aria-label={skill.name}>
         <div className="smm-head">
           <div className="smm-title-wrap">
             <div className="smm-title">{skill.name}</div>
@@ -77,15 +89,23 @@ export function SkillMdModal({ source, skill, allInLibSkills, onToggled, onClose
             <IconClose size={16} />
           </IconButton>
         </div>
-        <div className="smm-body">
-          {conflicts.length > 0 && (
-            <div className="smm-dup">
-              ⚠ 技能库已有同名技能 <b>{skill.name}</b>（来自 {conflicts.join('、')}）。加入后按源区分共存，注入时自动加源标识区分。
-            </div>
-          )}
-          <pre className="smm-pre">
-            {content !== null ? content : loadErr ? '（SKILL.md 读取失败）' : '加载中…'}
-          </pre>
+        <div className="smm-body smm-body--split">
+          <div className="smm-left">
+            {conflicts.length > 0 && (
+              <div className="smm-dup">
+                ⚠ 技能库已有同名技能 <b>{skill.name}</b>（来自 {conflicts.join('、')}）。加入后按源区分共存，注入时自动加源标识区分。
+              </div>
+            )}
+            <pre className="smm-pre">
+              {content !== null ? content : loadErr ? '（SKILL.md 读取失败）' : '加载中…'}
+            </pre>
+          </div>
+          <div className="smm-cfg">
+            <ConfigPanel
+              skill={{ effectiveName: skill.effectiveName, name: skill.name, sourceId: source.id, relPath: skill.relPath }}
+              requirement={req}
+            />
+          </div>
         </div>
         <div className="smm-foot">
           <div className="smm-foot-l">

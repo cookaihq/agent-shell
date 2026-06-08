@@ -26,6 +26,13 @@ import type { DiffPayload } from '../blocks/DiffModal'
  *  共享骨架（user_prompt/assistant_blocks + collapseStreamingText）+ 切片私有（claude 提取 msg_id；codex 无）。 */
 export interface HistoryService {
   rebuildBlocks(records: TranscriptRecord[]): MessageDTO[]
+  /**
+   * 重载时重建切片私有累计态（spec §5.4 sliceState 槽，P5c）。
+   * 切片从 transcript records 里 replay 自己落库的私有块（如 codex_subagent），经同一份 reduce 还原 sliceState
+   * → 重载形态 A/B/C 与 live 一致（live===重载）。缺省（如 claude）→ 外壳回落 initSliceState()。
+   * 复用 reduce 作单一真相，不另写一套重建逻辑。
+   */
+  rebuildSliceState?(records: TranscriptRecord[]): unknown
 }
 
 // ── 三挂载槽（spec §6）：subagent 整条链归切片，外壳只提供槽位、不读切片私有状态（SubagentMeta）──
@@ -94,6 +101,13 @@ export interface AgentSlice {
   headerEntry?(ctx: SliceViewCtx): ReactNode
   /** 右·面板挂载（spec §6 形态 B）：返回若干右栏视图槽（如 Subagent Gallery/Board）。缺省 → 右栏无 subagent 视图（codex）。 */
   rightViews?(ctx: SliceViewCtx): ViewSlot[]
+  /** 是否支持文件检查点回退（claude 开启 enableFileCheckpointing；codex 无）。缺省 false。 */
+  supportsFileRewind?: boolean
+  /**
+   * 当活动凭证来源是「本机 CLI 登录」却未登录时，是否在会话区显示未登录引导 banner。
+   * 仅 claude 有本机登录态实测；codex 登录后置 Part A（cliLogin 固定 unknown）→ 缺省 false（不显示）。
+   */
+  showsUnloggedBanner?: boolean
 }
 
 export type { SaCtx, OpenCommand, DiffPayload }
@@ -174,9 +188,9 @@ export interface ChatUIConfig {
   /** model-btn / chip 上的模型展示名（value → displayName）。 */
   getModelLabel(value: string, dyn?: UIModelOption[] | null): string
   /** 弹窗模型段（折叠/平铺、当前项、分组标题、全列表）。 */
-  getModelSection(state: RuntimeSlots, dyn?: UIModelOption[] | null): ModelSection
+  getModelSection(state: RuntimeSlots, dyn?: UIModelOption[] | null, providerModels?: UIModelOption[]): ModelSection
   /** RuntimeSwitcher 下拉用的扁平模型列表（label 已解析）。 */
-  getModelOptions(state: RuntimeSlots, dyn?: UIModelOption[] | null): UIModelOption[]
+  getModelOptions(state: RuntimeSlots, dyn?: UIModelOption[] | null, providerModels?: UIModelOption[]): UIModelOption[]
   /** 权限/审批多段选择器（claude 1 段；codex 2 段）。 */
   getModeSelector(state: RuntimeSlots): ModeSegment[]
   /** Effort 点滑条段（缺省 → 无 effort 段）。 */

@@ -6,7 +6,7 @@ import { homeTab, projectTab } from '../workspaceTabs'
 import type { ProjectDTO } from '../../api/types'
 
 const proj = (id: string, name: string): ProjectDTO =>
-  ({ id, name, path: '/p/' + id, createdAt: 0, status: 'idle', engine: 'claude' })
+  ({ id, name, path: '/p/' + id, createdAt: 0, status: 'idle', engine: 'claude', selectedAgent: null })
 
 test('项目页签标题按 projectId 现查 projects（改名即同步）', () => {
   const home = homeTab(1)

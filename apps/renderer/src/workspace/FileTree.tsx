@@ -15,7 +15,9 @@
 
 import { useState, useEffect } from 'react'
 import type { FileNode } from '../api/types'
+import type { EditorEntry } from '@agent-shell/contracts'
 import { RenameInput, type RenameCtx } from './RenameInput'
+import { fileTag } from '../utils/fileTag'
 
 /** 内部拖拽移动上下文（§5.6）：begin=拖起设标记、canDrop=能否放进 destDir、drop=落点移动；mime 用于区分内/外拖拽。 */
 export interface TreeDnd {
@@ -41,6 +43,15 @@ const ChevronIcon = () => (
     fill="none" stroke="currentColor" strokeWidth={2.2}
     strokeLinecap="round" strokeLinejoin="round">
     <path d="M9 6l6 6-6 6" />
+  </svg>
+)
+
+// 标题旁「在编辑器中打开」下拉的朝下 caret
+const CaretDownIcon = () => (
+  <svg width="12" height="12" viewBox="0 0 24 24"
+    fill="none" stroke="currentColor" strokeWidth={2.2}
+    strokeLinecap="round" strokeLinejoin="round">
+    <path d="M6 9l6 6 6-6" />
   </svg>
 )
 
@@ -85,17 +96,7 @@ const RefreshIcon = () => (
   </svg>
 )
 
-// ── 文件扩展名 → 短标识（对齐原型 workspace.html L129-130）─────────────────
-function fileTag(name: string): string {
-  const ext = name.split('.').pop()?.toLowerCase() ?? ''
-  if (ext === 'html' || ext === 'htm') return '</>'
-  if (ext === 'css') return '#'
-  if (ext === 'md') return 'M↓'
-  if (ext === 'json') return '{ }'
-  if (ext === 'ts' || ext === 'tsx') return 'TS'
-  if (ext === 'js' || ext === 'jsx') return 'JS'
-  return ext.toUpperCase() || '·'
-}
+// 文件扩展名 → 短标识：见 ../utils/fileTag（与 CtxFile 共用）。
 
 // ── 递归节点组件 ──────────────────────────────────────────────────────────────
 
@@ -221,14 +222,54 @@ interface FileTreeProps {
   createReq?: { kind: 'file' | 'dir'; seq: number }
   /** 内部拖拽移动上下文（§5.6）。 */
   dnd?: TreeDnd
+  /** 「在编辑器中打开」名单（已安装在前、未安装灰置底）；空/未传 → 不渲染 caret。 */
+  editors?: EditorEntry[]
+  /** 首次准备展开下拉时触发（让容器懒检测）。 */
+  onRequestEditors?: () => void
+  /** 点已安装编辑器项 → 用它打开项目根目录。 */
+  onOpenInEditor?: (id: string) => void
 }
 
-export function FileTree({ nodes, onOpen, onRefresh, onSelectDir, onCreate, onContext, rename, createReq, dnd }: FileTreeProps) {
+export function FileTree({ nodes, onOpen, onRefresh, onSelectDir, onCreate, onContext, rename, createReq, dnd, editors, onRequestEditors, onOpenInEditor }: FileTreeProps) {
   // 全局 activeNodePath（任何节点被点击时高亮，文件夹点击也高亮）
   const [activeNodePath, setActiveNodePath] = useState<string | null>(null)
   // 内联新建：'file' / 'dir' / null（点工具栏按钮进入，输入名字回车创建）
   const [creating, setCreating] = useState<'file' | 'dir' | null>(null)
   const [draft, setDraft] = useState('')
+
+  // 「在编辑器中打开」下拉：开关 + fixed 浮层坐标（.fb-tree overflow 会裁绝对定位，故用 fixed）
+  const [editorMenu, setEditorMenu] = useState<{ left: number; top: number } | null>(null)
+  // caret 可见性只看「功能可用」（容器传了数组=有桌面壳桥，含空数组），与「是否已检测到编辑器」解耦：
+  // 检测是懒触发（首次点 caret 才 onRequestEditors），若用 length>0 把可见性耦合到检测结果，
+  // 首启 editors=[] → 无 caret → 无法点 → 永不检测 → 永无 caret（死锁）。
+  const editorMenuEnabled = editors !== undefined
+  const openEditorMenu = (e: React.MouseEvent) => {
+    if (editorMenu) { setEditorMenu(null); return }
+    onRequestEditors?.()
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
+    const width = 208
+    const left = Math.max(8, Math.min(r.left, window.innerWidth - 8 - width))
+    setEditorMenu({ left, top: r.bottom + 4 })
+  }
+  useEffect(() => {
+    if (!editorMenu) return
+    const close = () => setEditorMenu(null)
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setEditorMenu(null) }
+    const onDocClick = (e: MouseEvent) => {
+      const t = e.target as HTMLElement
+      if (!t.closest('.fb-editor-menu') && !t.closest('.fb-tree-titlebtn')) setEditorMenu(null)
+    }
+    window.addEventListener('resize', close)
+    window.addEventListener('scroll', close, true)
+    document.addEventListener('keydown', onKey)
+    document.addEventListener('click', onDocClick)
+    return () => {
+      window.removeEventListener('resize', close)
+      window.removeEventListener('scroll', close, true)
+      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('click', onDocClick)
+    }
+  }, [editorMenu])
 
   const handleActivate = (path: string, isFolder: boolean) => {
     setActiveNodePath(path)
@@ -250,7 +291,15 @@ export function FileTree({ nodes, onOpen, onRefresh, onSelectDir, onCreate, onCo
   return (
     <div className="fb-tree" onContextMenu={(e) => { e.preventDefault(); onContext?.(null, e) }}>
       <div className="fb-tree-toolbar">
-        <span className="fb-tree-title">资源管理器</span>
+        {editorMenuEnabled ? (
+          <button className="fb-tree-titlebtn" type="button" title="在编辑器中打开"
+            aria-haspopup="menu" aria-expanded={!!editorMenu} onClick={openEditorMenu}>
+            <span className="fb-tree-title">资源管理器</span>
+            <span className="fb-tree-caret"><CaretDownIcon /></span>
+          </button>
+        ) : (
+          <span className="fb-tree-title">资源管理器</span>
+        )}
         <span className="fb-tree-tools">
           <button className="chat-hicon" title="新建文件" type="button" onClick={() => startCreate('file')} disabled={!onCreate}>
             <NewFileIcon />
@@ -263,6 +312,23 @@ export function FileTree({ nodes, onOpen, onRefresh, onSelectDir, onCreate, onCo
           </button>
         </span>
       </div>
+      {editorMenu && editorMenuEnabled && (
+        <div className="fb-editor-menu" role="menu" style={{ left: editorMenu.left, top: editorMenu.top }}>
+          <div className="fb-editor-head">在哪个编辑器中打开？</div>
+          {editors!.filter(e => e.installed).map(e => (
+            <button key={e.id} className="menu-item" type="button" role="menuitem"
+              onClick={() => { setEditorMenu(null); onOpenInEditor?.(e.id) }}>
+              <span className="fb-edicon">{e.label.slice(0, 2)}</span><span>{e.label}</span>
+            </button>
+          ))}
+          {editors!.some(e => !e.installed) && <div className="fb-editor-sep">未安装</div>}
+          {editors!.filter(e => !e.installed).map(e => (
+            <div key={e.id} className="menu-item is-disabled">
+              <span className="fb-edicon">{e.label.slice(0, 2)}</span><span>{e.label}</span>
+            </div>
+          ))}
+        </div>
+      )}
       {creating && (
         <div className="fb-create">
           <span className="fb-create-ic">{creating === 'dir' ? <FolderIcon /> : <NewFileIcon />}</span>

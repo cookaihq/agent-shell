@@ -2,7 +2,7 @@ import { createContext, useContext, useState, useCallback, useEffect } from 'rea
 import type { ReactNode } from 'react'
 import { api } from '../api/client'
 
-export type SettingsSection = 'exec' | 'system'
+export type SettingsSection = 'exec' | 'system' | 'secrets' | 'reminders' | 'proxy'
 
 interface SettingsCtx {
   open: boolean

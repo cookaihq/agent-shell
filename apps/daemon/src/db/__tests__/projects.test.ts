@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { openDatabase } from '../database'
-import { createProject, deleteProject, getProject, listProjects, renameProject } from '../projects'
+import { createProject, deleteProject, getProject, listProjects, renameProject, setProjectSelectedAgent } from '../projects'
 import { createSession, getSessionsByProject } from '../sessions'
 import { getUsage, recordUsage } from '../usage'
 
@@ -64,6 +64,30 @@ describe('projects repo', () => {
   it('deleteProject：不存在 → false', () => {
     const db = openDatabase(':memory:')
     expect(deleteProject(db, 'nope')).toBe(false)
+    db.close()
+  })
+
+  // Part B T1: 项目级持久化 selectedAgent
+  it('createProject：带 selectedAgent=codex → getProject 读回 selectedAgent===codex', () => {
+    const db = openDatabase(':memory:')
+    const p = createProject(db, { name: 'codex 项目', path: '/x', selectedAgent: 'codex' })
+    const got = getProject(db, p.id)
+    expect(got?.selectedAgent).toBe('codex')
+    db.close()
+  })
+
+  it('setProjectSelectedAgent：更新后读回新值', () => {
+    const db = openDatabase(':memory:')
+    const p = createProject(db, { name: 'agent 项目', path: '/y', selectedAgent: 'codex' })
+    setProjectSelectedAgent(db, p.id, 'claude')
+    expect(getProject(db, p.id)?.selectedAgent).toBe('claude')
+    db.close()
+  })
+
+  it('createProject：不传 selectedAgent → 读回 null', () => {
+    const db = openDatabase(':memory:')
+    const p = createProject(db, { name: '无 agent', path: '/z' })
+    expect(getProject(db, p.id)?.selectedAgent).toBeNull()
     db.close()
   })
 })

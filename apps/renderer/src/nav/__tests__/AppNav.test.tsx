@@ -3,19 +3,29 @@ import { render, screen, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { AppNav } from '../AppNav'
 import { SettingsProvider } from '../../settings/SettingsContext'
+import { NotificationsProvider } from '../../notifications/NotificationsContext'
 
 class FakeES { addEventListener() {} removeEventListener() {} close() {} constructor(public url: string) {} }
 vi.mock('../../api/client', () => ({ ApiError: class extends Error { constructor(public code: string) { super() } }, api: {
   engines: vi.fn().mockResolvedValue({ engines: { claude: '/c', codex: null } }),
-  listProjects: vi.fn().mockResolvedValue({ projects: [{ id: 'p1', name: '项目甲', path: '/x', createdAt: 1, status: 'idle', engine: 'claude' }] }),
+  listProjects: vi.fn().mockResolvedValue({ projects: [{ id: 'p1', name: '项目甲', path: '/x', createdAt: 1, status: 'idle', engine: 'claude', selectedAgent: null }] }),
   listSessions: vi.fn().mockResolvedValue({ sessions: [{ id: 's1', projectId: 'p1', engine: 'claude', model: 'opus', title: '会话一', pinned: false, status: 'completed', resumableId: 'r', createdAt: 1 }] }),
   messages: vi.fn().mockResolvedValue({ records: [] }), status: vi.fn().mockResolvedValue({ running: false, status: 'completed' }),
   usage: vi.fn().mockResolvedValue({ inputTokens: 0, outputTokens: 0, costUsd: 0 }), files: vi.fn().mockResolvedValue({ tree: [] }),
   createSession: vi.fn().mockResolvedValue({ sessionId: 's-new' }), createProject: vi.fn().mockResolvedValue({ projectId: 'p-new', path: '/p-new' }),
-  renameProject: vi.fn(), patchSession: vi.fn(), resume: vi.fn(), interrupt: vi.fn(), submit: vi.fn(),
+  renameProject: vi.fn(), patchSession: vi.fn(), patchProject: vi.fn().mockResolvedValue(undefined), resume: vi.fn(), interrupt: vi.fn(), submit: vi.fn(),
   listSkills: vi.fn().mockResolvedValue({ skills: [] }),
+  skillConfigCheck: vi.fn().mockResolvedValue({ conflicts: [], missing: [] }),
   commands: vi.fn().mockResolvedValue({ commands: null }),
   getConfig: vi.fn().mockResolvedValue({ projectsDir: '/p', skillsDir: '/s' }),
+  listProviders: vi.fn().mockResolvedValue({ engines: { claude: { active: 'default', providers: [] }, codex: { active: 'default', providers: [] } } }),
+  getReminders: vi.fn().mockResolvedValue({ version: 1, enabled: false, events: { attention: { channels: [], sound: { kind: 'system', id: 'default' } }, complete: { channels: [], sound: { kind: 'system', id: 'default' } }, failed: { channels: [], sound: { kind: 'system', id: 'default' } } }, external: { webhook: { enabled: false, secretRef: null }, feishu: { enabled: false, secretRef: null } } }),
+  reminderSoundUrl: vi.fn((projectId: string, name: string) => `/api/projects/${projectId}/reminders/sounds/${name}`),
+  // Task 6.1：Workspace 挂载取凭证状态判定未登录 banner（默认 signed-in → 不显示，不干扰既有断言）
+  getAuthStatus: vi.fn().mockResolvedValue({ engines: {
+    claude: { activeSource: 'cli-login', officialKey: {}, custom: [], cliLogin: { status: 'signed-in' }, oauth: { signedIn: false }, proxyBindings: {} },
+    codex: { activeSource: 'cli-login', officialKey: {}, custom: [], cliLogin: { status: 'unknown' }, oauth: { signedIn: false }, proxyBindings: {} },
+  } }),
 } }))
 // 页签持久在 localStorage（workspaceTabs），用例间必须清，否则上个用例残留的项目页签会
 // 被下个用例 loadTabs 恢复为 active → 渲染成项目视图而非首页，串状态。
@@ -23,24 +33,24 @@ beforeEach(() => { (globalThis as any).EventSource = FakeES; vi.clearAllMocks();
 
 describe('AppNav', () => {
   it('engines gate 通过 → 默认 home，渲染最近项目', async () => {
-    render(<SettingsProvider><AppNav /></SettingsProvider>); await act(async () => {})
+    render(<SettingsProvider><NotificationsProvider><AppNav /></NotificationsProvider></SettingsProvider>); await act(async () => {})
     expect(await screen.findByText('今天想构建点什么？')).toBeInTheDocument()
     expect(await screen.findByText('项目甲')).toBeInTheDocument()
   })
   it('home 点项目卡 → 进 workspace', async () => {
-    render(<SettingsProvider><AppNav /></SettingsProvider>); await act(async () => {})
+    render(<SettingsProvider><NotificationsProvider><AppNav /></NotificationsProvider></SettingsProvider>); await act(async () => {})
     await userEvent.click((await screen.findByText('项目甲')).closest('.proj-card')!)
     expect(await screen.findByText('会话一')).toBeInTheDocument()
   })
   it('engines 全缺 → no-cli 提示', async () => {
     const { api } = await import('../../api/client') as any
     api.engines.mockResolvedValueOnce({ engines: { claude: null, codex: null } })
-    render(<SettingsProvider><AppNav /></SettingsProvider>); await act(async () => {})
+    render(<SettingsProvider><NotificationsProvider><AppNav /></NotificationsProvider></SettingsProvider>); await act(async () => {})
     expect(await screen.findByText(/未检测到/)).toBeInTheDocument()
   })
   it('workspace 点返回 → 切回首页但项目页签保留、首页页签激活（reloadProjects 抛错也照切）', async () => {
     const { api } = await import('../../api/client') as any
-    const { container } = render(<SettingsProvider><AppNav /></SettingsProvider>); await act(async () => {})
+    const { container } = render(<SettingsProvider><NotificationsProvider><AppNav /></NotificationsProvider></SettingsProvider>); await act(async () => {})
     await userEvent.click((await screen.findByText('项目甲')).closest('.proj-card')!)
     await screen.findByText('会话一')
     expect(container.querySelectorAll('.ctab').length).toBe(2)   // 首页 + 项目页签
@@ -54,7 +64,7 @@ describe('AppNav', () => {
   })
   it('会话改名 → 页签/列表即时刷新（回写 phase.sessions，不只发 PATCH）', async () => {
     const { api } = await import('../../api/client') as any
-    const { container } = render(<SettingsProvider><AppNav /></SettingsProvider>); await act(async () => {})
+    const { container } = render(<SettingsProvider><NotificationsProvider><AppNav /></NotificationsProvider></SettingsProvider>); await act(async () => {})
     await userEvent.click((await screen.findByText('项目甲')).closest('.proj-card')!)
     await screen.findByText('会话一')
     await userEvent.click(await screen.findByTitle('历史会话'))   // 开历史弹窗
@@ -68,7 +78,7 @@ describe('AppNav', () => {
   })
   it('会话置顶 → 状态即时回写（pinned 反映到 UI，不只发 PATCH）', async () => {
     const { api } = await import('../../api/client') as any
-    const { container } = render(<SettingsProvider><AppNav /></SettingsProvider>); await act(async () => {})
+    const { container } = render(<SettingsProvider><NotificationsProvider><AppNav /></NotificationsProvider></SettingsProvider>); await act(async () => {})
     await userEvent.click((await screen.findByText('项目甲')).closest('.proj-card')!)
     await screen.findByText('会话一')
     await userEvent.click(await screen.findByTitle('历史会话'))
@@ -80,7 +90,7 @@ describe('AppNav', () => {
   it('项目改名 → 顶部页签标题即时刷新（onRename 回写 projects）', async () => {
     const { api } = await import('../../api/client') as any
     api.renameProject.mockResolvedValue({ ok: true })
-    const { container } = render(<SettingsProvider><AppNav /></SettingsProvider>); await act(async () => {})
+    const { container } = render(<SettingsProvider><NotificationsProvider><AppNav /></NotificationsProvider></SettingsProvider>); await act(async () => {})
     await userEvent.click((await screen.findByText('项目甲')).closest('.proj-card')!)
     await screen.findByText('会话一')
     const tabName = () => [...container.querySelectorAll('.ctab')].find((t) => !t.textContent?.includes('首页'))?.textContent
@@ -96,8 +106,8 @@ describe('AppNav', () => {
     // 随后那个旧 GET 才返回——旧版会用旧快照覆盖 projects，导致 tab 退回旧名而标题留新名（split-brain）。
     const { api } = await import('../../api/client') as any
     api.renameProject.mockResolvedValue({ ok: true })
-    const stale = [{ id: 'p1', name: '项目甲', path: '/x', createdAt: 1, status: 'idle', engine: 'claude' }]
-    const { container } = render(<SettingsProvider><AppNav /></SettingsProvider>); await act(async () => {})
+    const stale = [{ id: 'p1', name: '项目甲', path: '/x', createdAt: 1, status: 'idle', engine: 'claude', selectedAgent: null }]
+    const { container } = render(<SettingsProvider><NotificationsProvider><AppNav /></NotificationsProvider></SettingsProvider>); await act(async () => {})
     await userEvent.click((await screen.findByText('项目甲')).closest('.proj-card')!)
     await screen.findByText('会话一')
     // 安排「在途」reload：goHome 的 GET 返回一个我控制 resolve 时机的旧数据 promise
@@ -116,7 +126,7 @@ describe('AppNav', () => {
   })
   it('home 发送把选中技能传给 createProject（第二参为数组）', async () => {
     const { api } = await import('../../api/client') as any
-    render(<SettingsProvider><AppNav /></SettingsProvider>); await act(async () => {})
+    render(<SettingsProvider><NotificationsProvider><AppNav /></NotificationsProvider></SettingsProvider>); await act(async () => {})
     const ta = await screen.findByPlaceholderText(/描述你想让 agent/)
     await userEvent.type(ta, '做个登录页')
     await userEvent.keyboard('{Enter}')
@@ -131,11 +141,78 @@ describe('AppNav', () => {
     api.getConfig.mockResolvedValue({ projectsDir: '/p', skillsDir: '/s', engineModels: { claude: 'sonnet' } })
     // createSession 返回 's-new'；listSessions 得包含该 id，避免 session[0]=undefined 崩渲染
     api.listSessions.mockResolvedValue({ sessions: [{ id: 's-new', projectId: 'p-new', engine: 'claude', model: 'sonnet', title: '新会话', pinned: false, status: 'idle', resumableId: null, createdAt: Date.now() }] })
-    render(<SettingsProvider><AppNav /></SettingsProvider>); await act(async () => {})
+    render(<SettingsProvider><NotificationsProvider><AppNav /></NotificationsProvider></SettingsProvider>); await act(async () => {})
     const ta = await screen.findByPlaceholderText(/描述你想让 agent/)
     await userEvent.type(ta, '测试持久化模型')
     await userEvent.keyboard('{Enter}')
     await act(async () => {})
     expect(api.createSession).toHaveBeenCalledWith(expect.objectContaining({ model: 'sonnet' }))
+  })
+  it('active provider defaultModel 优先 engineModels 作为种子（P2）', async () => {
+    // listProviders 返回 claude active=p1、defaultModel='relay-opus'，getConfig 返回 claude='sonnet'
+    // 期望新建会话 model='relay-opus'（providerDefaults 优先）而非 'sonnet'（engineModels）
+    const { api } = await import('../../api/client') as any
+    api.listProviders.mockResolvedValueOnce({
+      engines: {
+        claude: { active: 'p1', providers: [{ id: 'p1', engine: 'claude', name: 'fox', baseUrl: 'b', keyEnv: 'auth_token', hasKey: true, maskedKey: '', sortIndex: 0, createdAt: 1, models: [{ value: 'relay-opus', label: 'Relay Opus' }], defaultModel: 'relay-opus', wireApi: 'responses' }] },
+        codex: { active: 'default', providers: [] },
+      },
+    })
+    api.getConfig.mockResolvedValue({ projectsDir: '/p', skillsDir: '/s', engineModels: { claude: 'sonnet' } })
+    api.listSessions.mockResolvedValue({ sessions: [{ id: 's-new', projectId: 'p-new', engine: 'claude', model: 'relay-opus', title: '新会话', pinned: false, status: 'idle', resumableId: null, createdAt: Date.now() }] })
+    render(<SettingsProvider><NotificationsProvider><AppNav /></NotificationsProvider></SettingsProvider>); await act(async () => {})
+    const ta = await screen.findByPlaceholderText(/描述你想让 agent/)
+    await userEvent.type(ta, '测试 providerDefaults 优先')
+    await userEvent.keyboard('{Enter}')
+    await act(async () => {})
+    expect(api.createSession).toHaveBeenCalledWith(expect.objectContaining({ model: 'relay-opus' }))
+  })
+  it('首页「注入技能」徽标排除内置：autoInject 内置+普通各一 → 徽标显示 1', async () => {
+    const { api } = await import('../../api/client') as any
+    api.listSkillLibrary = vi.fn().mockResolvedValue({ skills: [
+      { effectiveName: 'install-skill', name: 'install-skill', desc: '', sourceId: 'builtin', sourceName: '内置', globalIn: [], autoInject: true },
+      { effectiveName: 'pdf', name: 'pdf', desc: '', sourceId: 'a', sourceName: 'anthropics', globalIn: [], autoInject: true },
+    ] })
+    render(<SettingsProvider><NotificationsProvider><AppNav /></NotificationsProvider></SettingsProvider>); await act(async () => {})
+    await screen.findByText('今天想构建点什么？')
+    const badge = document.querySelector('.skill-inject-btn .si-count')
+    expect(badge?.textContent).toBe('1')   // 内置 install-skill 不计入，仅数 pdf
+  })
+  it('within-project 新建默认会话 engine 来自 project.selectedAgent，不用 home runtime', async () => {
+    // 项目 selectedAgent='codex'，home runtime 默认 claude；空会话列表 → openProject 走 createSession 分支
+    // 期望：createSession 的 engine='codex'（来自项目属性），而不是 'claude'（home runtime）
+    const { api } = await import('../../api/client') as any
+    api.listProjects.mockResolvedValueOnce({ projects: [{ id: 'p1', name: '项目甲', path: '/x', createdAt: 1, status: 'idle', engine: 'codex', selectedAgent: 'codex' }] })
+    api.listSessions.mockResolvedValueOnce({ sessions: [] })  // 空会话 → 触发 createSession
+    api.listSessions.mockResolvedValue({ sessions: [{ id: 's-new', projectId: 'p1', engine: 'codex', model: 'gpt-5.5', title: '新会话', pinned: false, status: 'idle', resumableId: null, createdAt: Date.now() }] })
+    render(<SettingsProvider><NotificationsProvider><AppNav /></NotificationsProvider></SettingsProvider>); await act(async () => {})
+    await userEvent.click((await screen.findByText('项目甲')).closest('.proj-card')!)
+    await act(async () => {})
+    expect(api.createSession).toHaveBeenCalledWith(expect.objectContaining({ engine: 'codex' }))
+  })
+  it('homeSend 建会话 engine 来自 home runtime + patchProject 持久化 selectedAgent', async () => {
+    // home runtime 默认 claude（localStorage 无预置），发送 → createSession engine='claude'，patchProject 持久化
+    const { api } = await import('../../api/client') as any
+    api.listSessions.mockResolvedValue({ sessions: [{ id: 's-new', projectId: 'p-new', engine: 'claude', model: 'opus', title: '新会话', pinned: false, status: 'idle', resumableId: null, createdAt: Date.now() }] })
+    render(<SettingsProvider><NotificationsProvider><AppNav /></NotificationsProvider></SettingsProvider>); await act(async () => {})
+    const ta = await screen.findByPlaceholderText(/描述你想让 agent/)
+    await userEvent.type(ta, '测试homeSend持久化')
+    await userEvent.keyboard('{Enter}')
+    await act(async () => {})
+    expect(api.createSession).toHaveBeenCalledWith(expect.objectContaining({ engine: 'claude' }))
+    expect(api.patchProject).toHaveBeenCalledWith('p-new', { selectedAgent: 'claude' })
+  })
+  it('home runtime 从 localStorage 恢复上次 agent：预置 codex → homeSend 用 codex', async () => {
+    // 验证「上次全局选 codex → 重开 app 后首页新建仍是 codex」：渲染前预置 localStorage（beforeEach 已 clear，故在本用例内 set）
+    const { api } = await import('../../api/client') as any
+    globalThis.localStorage.setItem('agent-shell:last-global-agent', 'codex')
+    api.listSessions.mockResolvedValue({ sessions: [{ id: 's-new', projectId: 'p-new', engine: 'codex', model: 'gpt-5.5', title: '新会话', pinned: false, status: 'idle', resumableId: null, createdAt: Date.now() }] })
+    render(<SettingsProvider><NotificationsProvider><AppNav /></NotificationsProvider></SettingsProvider>); await act(async () => {})
+    const ta = await screen.findByPlaceholderText(/描述你想让 agent/)
+    await userEvent.type(ta, '测试localStorage恢复')
+    await userEvent.keyboard('{Enter}')
+    await act(async () => {})
+    expect(api.createSession).toHaveBeenCalledWith(expect.objectContaining({ engine: 'codex' }))
+    expect(api.patchProject).toHaveBeenCalledWith('p-new', { selectedAgent: 'codex' })
   })
 })

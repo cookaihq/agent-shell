@@ -1,14 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { api } from '../api/client'
-import type { CliToolDef } from '../api/types'
-import RECOMMENDED_RAW from '../integrations/cliTools.zh.json'
+import type { CliToolDef, CliToolRuntimeInfo, CustomCliTool, CliToolPlatform } from '../api/types'
 
-// 内置策展推荐列表（friendliness 等为策展元数据，写死）。加入后由 daemon 持久化并生成 SKILL.md 注入。
-const RECOMMENDED = RECOMMENDED_RAW as CliToolDef[]
-
-const IconSearch = () => (
-  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="7" /><path d="M21 21l-4-4" /></svg>
-)
 const IconPlus = () => (
   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.4} strokeLinecap="round"><path d="M12 5v14M5 12h14" /></svg>
 )
@@ -19,87 +12,6 @@ const IconClose = () => (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round"><path d="M6 6l12 12M18 6L6 18" /></svg>
 )
 
-function Hearts({ n }: { n: number }) {
-  return (
-    <span className="clit-hearts" title={`Agent 友好度 ${n}/5`}>
-      {Array.from({ length: 5 }, (_, i) => (
-        <span key={i} className={i < n ? '' : 'off'}>{i < n ? '♥' : '♡'}</span>
-      ))}
-    </span>
-  )
-}
-
-function CopyBtn({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false)
-  return (
-    <button
-      className="clit-copy"
-      type="button"
-      onClick={() => {
-        if (navigator.clipboard) void navigator.clipboard.writeText(text).catch(() => { /* */ })
-        setCopied(true); setTimeout(() => setCopied(false), 1200)
-      }}
-    >{copied ? '已复制' : '复制'}</button>
-  )
-}
-
-interface CardProps {
-  tool: CliToolDef
-  added: boolean
-  installedPath: string | null | undefined
-  open: boolean
-  onToggleOpen: () => void
-  onAdd: () => void
-  onRemove: () => void
-}
-function Card({ tool, added, installedPath, open, onToggleOpen, onAdd, onRemove }: CardProps) {
-  const installed = !!installedPath
-  return (
-    <div className={`clit-card${open ? ' is-open' : ''}`} data-id={tool.id}>
-      <div className="clit-card-top">
-        <div className="clit-name">
-          {tool.name}
-          <span className="clit-tags">{tool.tags.map((t) => <span key={t} className="clit-tag">{t}</span>)}</span>
-        </div>
-      </div>
-      <div className="clit-desc">{tool.desc}</div>
-      <div className="clit-foot">
-        <div className="clit-fr">Agent 友好度 <Hearts n={tool.friendliness} /></div>
-        <div className="clit-foot-r">
-          <button className="clit-chev" type="button" title="详情" onClick={onToggleOpen}><IconChevron /></button>
-          {added
-            ? <button className="clit-act is-added" type="button" onClick={onRemove}>✓ 已加入</button>
-            : <button className="clit-act is-add" type="button" onClick={onAdd}><IconPlus />加入</button>}
-        </div>
-      </div>
-      {open && (
-        <div className="clit-detail">
-          <div className="clit-drow">
-            <div className="clit-dlab">安装状态</div>
-            <span className={`clit-stat ${installed ? 'ok' : 'miss'}`}>
-              ● {installed ? '已安装' : '未安装'}
-              <span className="clit-stat-sub">（{installed ? `本机命中 ${tool.cmd}` : `本机未检测到 ${tool.cmd}`}）</span>
-            </span>
-          </div>
-          {!installed && (
-            <div className="clit-drow">
-              <div className="clit-dlab">安装命令</div>
-              <div className="clit-cmd"><code>{tool.install || `# 请按官方文档安装 ${tool.name}`}</code><CopyBtn text={tool.install || ''} /></div>
-            </div>
-          )}
-          <div className="clit-drow">
-            <div className="clit-dlab">注入给 agent 的用法</div>
-            <div className="clit-usage">{tool.usage}</div>
-          </div>
-          {tool.home && (
-            <div className="clit-drow"><a className="clit-link" href={tool.home} target="_blank" rel="noreferrer">官网 / 文档 ↗</a></div>
-          )}
-        </div>
-      )}
-    </div>
-  )
-}
-
 function Section({ title, count, children }: { title: string; count: number; children: React.ReactNode }) {
   return (
     <div className="clit-sec">
@@ -109,126 +21,287 @@ function Section({ title, count, children }: { title: string; count: number; chi
   )
 }
 
-interface AddModalProps { onClose: () => void; onSave: (def: Omit<CliToolDef, 'id'>) => void }
-function AddCliToolModal({ onClose, onSave }: AddModalProps) {
+// 已安装的 catalog 工具卡片：只显示版本，无「安装」按钮（已在系统里，无「移除」）
+interface InstalledCardProps {
+  tool: CliToolDef
+  info: CliToolRuntimeInfo
+  open: boolean
+  onToggleOpen: () => void
+}
+function InstalledCard({ tool, info, open, onToggleOpen }: InstalledCardProps) {
+  return (
+    <div className={`clit-card${open ? ' is-open' : ''}`} data-id={tool.id}>
+      <div className="clit-card-top">
+        <div className="clit-name">{tool.name}</div>
+      </div>
+      <div className="clit-desc">{tool.summary}</div>
+      <div className="clit-foot">
+        <div className="clit-fr">
+          <span className="clit-stat ok">● 已安装{info.version ? ` v${info.version}` : ''}</span>
+        </div>
+        <div className="clit-foot-r">
+          <button className="clit-chev" type="button" title="详情" onClick={onToggleOpen}><IconChevron /></button>
+        </div>
+      </div>
+      {open && (
+        <div className="clit-detail">
+          <div className="clit-drow">
+            <div className="clit-dlab">简介</div>
+            <div>{tool.detailIntro || tool.summary}</div>
+          </div>
+          {tool.useCases.length > 0 && (
+            <div className="clit-drow">
+              <div className="clit-dlab">用途</div>
+              <ul style={{ margin: 0, paddingLeft: '1.2em' }}>{tool.useCases.map((u, i) => <li key={i}>{u}</li>)}</ul>
+            </div>
+          )}
+          {tool.home && (
+            <div className="clit-drow"><a className="clit-link" href={tool.home} target="_blank" rel="noreferrer">官网 ↗</a></div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// 自定义工具卡片：显示 binPath/version/description，可移除
+interface CustomCardProps {
+  tool: CustomCliTool
+  onRemove: () => void
+}
+function CustomCard({ tool, onRemove }: CustomCardProps) {
+  return (
+    <div className="clit-card" data-id={tool.id}>
+      <div className="clit-card-top">
+        <div className="clit-name">
+          {tool.name || tool.binName}
+          <span className="clit-tags"><span className="clit-tag">自定义</span></span>
+        </div>
+      </div>
+      {tool.description && <div className="clit-desc">{tool.description}</div>}
+      <div className="clit-foot">
+        <div className="clit-fr">
+          <span className="clit-stat ok">● {tool.version ? `v${tool.version}` : '已登记'}</span>
+          <span style={{ marginLeft: 6, fontSize: '0.78em', color: 'var(--fg-3)' }}>{tool.binPath}</span>
+        </div>
+        <div className="clit-foot-r">
+          <button className="clit-act" type="button" style={{ color: 'var(--fg-3)' }} onClick={onRemove}>移除</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// 可安装工具卡片：点「安装」→ 触发 onInstallSeed，预填首页 composer 引导 agent 安装
+interface CanInstallCardProps {
+  tool: CliToolDef
+  platform: CliToolPlatform
+  open: boolean
+  onToggleOpen: () => void
+  onInstall: () => void
+}
+function CanInstallCard({ tool, platform, open, onToggleOpen, onInstall }: CanInstallCardProps) {
+  // 取当前平台首选安装方式（用于展示参考命令）
+  const platformMethod = tool.installMethods.find((m) => m.platforms.includes(platform))
+  return (
+    <div className={`clit-card${open ? ' is-open' : ''}`} data-id={tool.id}>
+      <div className="clit-card-top">
+        <div className="clit-name">{tool.name}</div>
+      </div>
+      <div className="clit-desc">{tool.summary}</div>
+      <div className="clit-foot">
+        <div className="clit-foot-r">
+          <button className="clit-chev" type="button" title="详情" onClick={onToggleOpen}><IconChevron /></button>
+          <button className="clit-act is-add" type="button" onClick={onInstall}><IconPlus />安装</button>
+        </div>
+      </div>
+      {open && (
+        <div className="clit-detail">
+          <div className="clit-drow">
+            <div className="clit-dlab">简介</div>
+            <div>{tool.detailIntro || tool.summary}</div>
+          </div>
+          {platformMethod && (
+            <div className="clit-drow">
+              <div className="clit-dlab">安装命令（参考）</div>
+              <div className="clit-cmd"><code>{platformMethod.command}</code></div>
+            </div>
+          )}
+          {tool.useCases.length > 0 && (
+            <div className="clit-drow">
+              <div className="clit-dlab">用途</div>
+              <ul style={{ margin: 0, paddingLeft: '1.2em' }}>{tool.useCases.map((u, i) => <li key={i}>{u}</li>)}</ul>
+            </div>
+          )}
+          {tool.home && (
+            <div className="clit-drow"><a className="clit-link" href={tool.home} target="_blank" rel="noreferrer">官网 ↗</a></div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// 自定义登记弹窗：按绝对路径登记（binPath 必填，name/description 可选）
+interface AddCustomModalProps { onClose: () => void; onSave: (binPath: string, name?: string, description?: string) => void }
+function AddCustomModal({ onClose, onSave }: AddCustomModalProps) {
+  const [binPath, setBinPath] = useState('')
   const [name, setName] = useState('')
-  const [cmd, setCmd] = useState('')
-  const [install, setInstall] = useState('')
-  const [tags, setTags] = useState('')
-  const [usage, setUsage] = useState('')
+  const [description, setDescription] = useState('')
   useEffect(() => {
     const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     document.addEventListener('keydown', esc)
     return () => document.removeEventListener('keydown', esc)
   }, [onClose])
   const save = () => {
-    if (!name.trim() || !cmd.trim()) return
-    onSave({
-      name: name.trim(), cmd: cmd.trim(),
-      tags: tags.split(/[,，]/).map((s) => s.trim()).filter(Boolean),
-      desc: '自定义命令行工具。',
-      install: install.trim() || undefined,
-      usage: usage.trim() || `调用 ${cmd.trim()} 完成相关任务。`,
-      friendliness: 0, custom: true,
-    })
+    if (!binPath.trim()) return
+    onSave(binPath.trim(), name.trim() || undefined, description.trim() || undefined)
   }
   return (
     <div className="modal-backdrop open" onClick={(e) => { if (e.target === e.currentTarget) onClose() }}>
-      <div className="np-modal" role="dialog" aria-label="添加 CLI 工具" style={{ maxHeight: '88vh', overflow: 'auto' }}>
+      <div className="np-modal" role="dialog" aria-label="登记 CLI 工具" style={{ maxHeight: '88vh', overflow: 'auto' }}>
         <button className="modal-close" type="button" title="关闭 (Esc)" onClick={onClose}><IconClose /></button>
-        <h2 className="np-h">添加 CLI 工具</h2>
-        <p className="np-sub">登记一个本机命令行工具，加入后检测安装状态并把用法注入给 agent。</p>
-        <div className="field"><div className="field-label">名称<span className="req">*</span></div><input className="field-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="如 Pandoc" autoFocus /></div>
-        <div className="field"><div className="field-label">可执行命令<span className="req">*</span><span className="link">用于 which 检测</span></div><input className="field-input" value={cmd} onChange={(e) => setCmd(e.target.value)} placeholder="如 pandoc" /></div>
-        <div className="field"><div className="field-label">安装命令</div><input className="field-input" value={install} onChange={(e) => setInstall(e.target.value)} placeholder="如 brew install pandoc" /></div>
-        <div className="field"><div className="field-label">分类</div><input className="field-input" value={tags} onChange={(e) => setTags(e.target.value)} placeholder="逗号分隔，如 开发,效率" /></div>
-        <div className="field"><div className="field-label">用法说明（注入给 agent）</div><textarea className="field-textarea" value={usage} onChange={(e) => setUsage(e.target.value)} placeholder="一句话告诉 agent 这个工具能干什么、怎么调用…" /></div>
-        <div className="np-actions"><button className="btn btn-ghost" type="button" onClick={onClose}>取消</button><button className="btn btn-primary" type="button" onClick={save}>添加</button></div>
+        <h2 className="np-h">登记 CLI 工具</h2>
+        <p className="np-sub">按绝对路径登记一个本机命令行工具，登记后 daemon 检测安装状态，用途说明会注入 agent 的工具上下文（让它知道这工具可用）。</p>
+        <div className="field"><div className="field-label">可执行文件绝对路径<span className="req">*</span></div><input className="field-input" value={binPath} onChange={(e) => setBinPath(e.target.value)} placeholder="如 /usr/local/bin/jq 或 /opt/homebrew/bin/ffmpeg" autoFocus /></div>
+        <div className="field"><div className="field-label">名称（可选）</div><input className="field-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="如 jq（留空则取可执行文件名）" /></div>
+        <div className="field"><div className="field-label">用途说明（可选）</div><textarea className="field-textarea" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="一句话告诉 agent 这个工具能干什么…" /></div>
+        <div className="np-actions"><button className="btn btn-ghost" type="button" onClick={onClose}>取消</button><button className="btn btn-primary" type="button" onClick={save} disabled={!binPath.trim()}>添加</button></div>
       </div>
     </div>
   )
 }
 
-export function CliTools() {
-  const [added, setAdded] = useState<CliToolDef[]>([])
-  const [detected, setDetected] = useState<Record<string, string | null>>({})
-  const [q, setQ] = useState('')
+interface CliToolsProps {
+  // onInstallSeed：点「安装」后跳首页并预填 composer 引导 agent 安装
+  onInstallSeed?: (text: string) => void
+}
+
+export function CliTools({ onInstallSeed }: CliToolsProps) {
+  const [catalog, setCatalog] = useState<CliToolDef[]>([])
+  const [detected, setDetected] = useState<CliToolRuntimeInfo[]>([])
+  const [custom, setCustom] = useState<CustomCliTool[]>([])
+  const [platform, setPlatform] = useState<CliToolPlatform>('darwin')
   const [open, setOpen] = useState<Set<string>>(new Set())
   const [adding, setAdding] = useState(false)
+  const [loading, setLoading] = useState(true)   // 首次加载（catalog + 本机检测未返回）显示「检测中」，避免直接闪空态
 
   const load = useCallback(async () => {
-    let list: CliToolDef[] = []
-    try { list = (await api.listCliTools()).tools } catch { list = [] }
-    setAdded(list)
-    const cmds = Array.from(new Set([...RECOMMENDED, ...list].map((t) => t.cmd)))
-    try { setDetected((await api.detectClis(cmds)).detected) } catch { /* 探测失败：全显未安装，不崩页 */ }
+    // catalog 和 installed 独立加载，失败各自兜底空，不互相阻塞
+    const [catRes, instRes] = await Promise.allSettled([
+      api.getCliCatalog(),
+      api.getCliInstalled(),
+    ])
+    if (catRes.status === 'fulfilled') setCatalog(catRes.value.tools)
+    if (instRes.status === 'fulfilled') {
+      setDetected(instRes.value.detected)
+      setCustom(instRes.value.custom)
+      setPlatform(instRes.value.platform)
+    }
+    setLoading(false)   // catalog + 检测都尘埃落定后，才允许显示空态
   }, [])
   useEffect(() => { void load() }, [load])
 
-  const addedIds = useMemo(() => new Set(added.map((t) => t.id)), [added])
-  const recommended = useMemo(() => RECOMMENDED.filter((t) => !addedIds.has(t.id)), [addedIds])
+  // 已检测到安装的 catalog 工具（id 匹配 detected 里 status==='installed' 的）
+  const detectedMap = new Map(detected.map((d) => [d.id, d]))
+  const installedCatalog = catalog.filter((t) => detectedMap.get(t.id)?.status === 'installed')
+  const installedIds = new Set(installedCatalog.map((t) => t.id))
 
-  const match = useCallback((t: CliToolDef) => {
-    const s = q.trim().toLowerCase()
-    return !s || `${t.name} ${t.desc} ${t.tags.join(' ')}`.toLowerCase().includes(s)
-  }, [q])
-  const addedShown = added.filter(match)
-  const recoShown = recommended.filter(match)
-
-  const handleAdd = async (def: Omit<CliToolDef, 'id'> & { id?: string }) => {
-    try { await api.addCliTool(def) } catch { /* */ }
-    await load()
-  }
-  const handleRemove = async (id: string) => {
-    try { await api.removeCliTool(id) } catch { /* */ }
-    await load()
-  }
-  const toggleOpen = (id: string) => setOpen((prev) => {
-    const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n
+  // 可安装：未装 且 有当前平台安装方式的 catalog 工具
+  const canInstall = catalog.filter((t) => {
+    if (installedIds.has(t.id)) return false
+    return t.installMethods.some((m) => m.platforms.includes(platform))
   })
 
-  const renderCard = (tool: CliToolDef, isAdded: boolean) => (
-    <Card
-      key={tool.id}
-      tool={tool}
-      added={isAdded}
-      installedPath={detected[tool.cmd]}
-      open={open.has(tool.id)}
-      onToggleOpen={() => toggleOpen(tool.id)}
-      onAdd={() => void handleAdd(tool)}
-      onRemove={() => void handleRemove(tool.id)}
-    />
-  )
+  const toggleOpen = (id: string) => setOpen((prev) => {
+    const n = new Set(prev)
+    if (n.has(id)) n.delete(id); else n.add(id)
+    return n
+  })
+
+  // 点「安装」：构造安装提示词 → 传给 AppNav → 跳首页 + 预填 composer
+  const handleInstall = (tool: CliToolDef) => {
+    if (!onInstallSeed) return
+    const method = tool.installMethods.find((m) => m.platforms.includes(platform))
+    const refCmd = method?.command ?? `# 请参考官方文档安装 ${tool.name}`
+    const prompt = `帮我安装命令行工具「${tool.name}」(id: ${tool.id})（参考命令：${refCmd}）。用 as_cli_install 装好并顺手补用途说明。`
+    onInstallSeed(prompt)
+  }
+
+  const handleAddCustom = async (binPath: string, name?: string, description?: string) => {
+    setAdding(false)
+    try { await api.addCustomCliTool(binPath, name, description) } catch { /* 静默，不崩页 */ }
+    await load()
+  }
+
+  const handleRemoveCustom = async (id: string) => {
+    try { await api.removeCustomCliTool(id) } catch { /* 静默，不崩页 */ }
+    await load()
+  }
+
+  // 已安装区总数：catalog 已装 + custom
+  const installedCount = installedCatalog.length + custom.length
 
   return (
     <>
       <p className="set-kicker">集成</p>
       <h2 className="set-h">命令行工具</h2>
-      <p className="set-sub">把本机命令行工具接入 agent —— 加入后检测本机是否已安装、给出安装引导，并生成一个 SKILL.md 把用法注入给 agent（在「注入技能」里可选中），让它在任务里直接调用。</p>
+      <p className="set-sub">检测本机已装的命令行工具，把用法注入给 agent；未装的可以让 agent 帮你安装。也可以按绝对路径登记自定义工具。</p>
 
       <div className="clit-top">
-        <label className="clit-search">
-          <IconSearch />
-          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜索命令行工具…" autoComplete="off" />
-        </label>
-        <button className="skill-new" type="button" onClick={() => setAdding(true)}><IconPlus />添加 CLI 工具</button>
+        <button className="skill-new" type="button" onClick={() => setAdding(true)}><IconPlus />登记自定义工具</button>
       </div>
 
-      <Section title="已添加" count={addedShown.length}>
-        {addedShown.length === 0
-          ? <div className="clit-empty">{q ? '没有匹配的已添加工具' : '还没有加入任何工具 —— 从下方推荐里挑，或「添加 CLI 工具」自定义。'}</div>
-          : <div className="clit-grid">{addedShown.map((t) => renderCard(t, true))}</div>}
+      {/* 已安装区 */}
+      <Section title="已安装" count={installedCount}>
+        {loading
+          ? <div className="clit-empty">正在检测本机已安装的命令行工具…</div>
+          : installedCount === 0
+          ? <div className="clit-empty">暂未检测到已安装的工具——daemon 在后台探测，稍后刷新可见。</div>
+          : (
+            <div className="clit-grid">
+              {installedCatalog.map((tool) => {
+                const info = detectedMap.get(tool.id)!
+                return (
+                  <InstalledCard
+                    key={tool.id}
+                    tool={tool}
+                    info={info}
+                    open={open.has(tool.id)}
+                    onToggleOpen={() => toggleOpen(tool.id)}
+                  />
+                )
+              })}
+              {custom.map((ct) => (
+                <CustomCard key={ct.id} tool={ct} onRemove={() => void handleRemoveCustom(ct.id)} />
+              ))}
+            </div>
+          )}
       </Section>
 
-      {!(q && recoShown.length === 0) && (
-        <Section title="推荐" count={recoShown.length}>
-          {recoShown.length === 0
-            ? <div className="clit-empty">没有匹配的推荐工具</div>
-            : <div className="clit-grid">{recoShown.map((t) => renderCard(t, false))}</div>}
-        </Section>
-      )}
+      {/* 可安装区（仅当前平台有方式的工具） */}
+      <Section title="可安装" count={canInstall.length}>
+        {loading
+          ? <div className="clit-empty">正在检测可安装的命令行工具…</div>
+          : canInstall.length === 0
+          ? <div className="clit-empty">暂无适合当前平台的可安装工具。</div>
+          : (
+            <div className="clit-grid">
+              {canInstall.map((tool) => (
+                <CanInstallCard
+                  key={tool.id}
+                  tool={tool}
+                  platform={platform}
+                  open={open.has(tool.id)}
+                  onToggleOpen={() => toggleOpen(tool.id)}
+                  onInstall={() => handleInstall(tool)}
+                />
+              ))}
+            </div>
+          )}
+      </Section>
 
-      {adding && <AddCliToolModal onClose={() => setAdding(false)} onSave={(def) => { setAdding(false); void handleAdd(def) }} />}
+      {adding && <AddCustomModal onClose={() => setAdding(false)} onSave={(binPath, name, desc) => void handleAddCustom(binPath, name, desc)} />}
     </>
   )
 }

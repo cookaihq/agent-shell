@@ -1,5 +1,4 @@
 import { describe, it, expect, afterEach } from 'vitest'
-import { EventEmitter } from 'node:events'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -8,6 +7,7 @@ import { openDatabase } from '../db/database'
 import { SessionRuntime } from '../session/sessionRuntime'
 import { getSession } from '../db/sessions'
 import { readRecords } from '../session/transcript'
+import { fakeCodexClient } from '../runtimes/codex/__tests__/fakeCodexClient'
 
 let server: DaemonServer | null = null
 let tmp = ''
@@ -24,22 +24,14 @@ afterEach(async () => {
   if (tmp) fs.rmSync(tmp, { recursive: true, force: true })
 }, 20000)
 
-function fakeChild() {
-  const cp: any = new EventEmitter()
-  cp.stdout = new EventEmitter(); cp.stderr = new EventEmitter()
-  cp.stdinWrites = []; cp.stdinEnded = false
-  cp.stdin = { write: (s: string) => { cp.stdinWrites.push(s); return true }, end: () => { cp.stdinEnded = true } }
-  cp.kill = () => true
-  return cp
-}
 const tick = () => new Promise((r) => setImmediate(r))
 
 describe('M6 端到端会话生命周期', () => {
-  it('建项目→建会话→submit→SSE→落库→续投→interrupt（codex 全链路，mock 引擎）', async () => {
+  it('建项目→建会话→submit→SSE→落库→续投→interrupt（codex app-server 全链路，mock client）', async () => {
     const db = openDatabase(':memory:')
-    const children: any[] = []
+    const codex = fakeCodexClient()
     const tdir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-tr-'))
-    const runtime = new SessionRuntime({ db, resolveBin: () => '/bin', spawnFn: (() => { const c = fakeChild(); children.push(c); return c }) as any, transcriptDir: tdir })
+    const runtime = new SessionRuntime({ db, resolveBin: () => '/bin', codexClientFactory: codex.factory, transcriptDir: tdir })
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'as-e2e-'))
     server = await startDaemon({ detect: () => ({ claude: '/x', codex: '/x' }), db, runtime, projectsDir: tmp })
     const U = server.url
@@ -57,17 +49,19 @@ describe('M6 端到端会话生命周期', () => {
 
     // 4. submit 第一条 + 运行中续投第二条
     await fetch(U + `/sessions/${sid}/messages`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: 'q1' }) })
-    await fetch(U + `/sessions/${sid}/messages`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: 'q2' }) })  // 入队
-    const cp1 = children[0]
-    cp1.stdout.emit('data', JSON.stringify({ type: 'thread.started', thread_id: 'th-e2e' }) + '\n')
-    cp1.stdout.emit('data', JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'a1' } }) + '\n')
-    cp1.stdout.emit('data', JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 2, output_tokens: 3 } }) + '\n')
-    cp1.emit('close', 0, null)
+    await tick()
+    const c = codex.current()
+    c.notify('turn/started', { turn: { id: 'turn-1', status: 'inProgress' } })
+    await fetch(U + `/sessions/${sid}/messages`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: 'q2' }) })  // 运行中入队
+    // q1 一轮：agentMessage 定格 a1 → usage → turn/completed
+    c.notify('item/completed', { item: { type: 'agentMessage', id: 'msg-1', text: 'a1' } })
+    c.notify('thread/tokenUsage/updated', { tokenUsage: { total: { inputTokens: 2, outputTokens: 3 } } })
+    c.notify('turn/completed', { turn: { id: 'turn-1', status: 'completed' } })
     await tick()
 
-    // 续投起了第二个进程，resumable_id 落库
-    expect(children.length).toBe(2)
-    expect(getSession(db, sid)).toMatchObject({ resumableId: 'th-e2e' })
+    // 常驻保活：q2 在同一 app-server 续投（pushUser，不新起 client）；thread_id 落库为 resumable_id
+    expect(codex.instances.length).toBe(1)
+    expect(getSession(db, sid)).toMatchObject({ resumableId: 'th-1' })
 
     // 5. SSE 收到第一轮 message 事件（循环读跳过 ": connected" 握手帧）
     const decoder = new TextDecoder()
@@ -79,9 +73,9 @@ describe('M6 端到端会话生命周期', () => {
     }
     expect(collected).toContain('event: message')
 
-    // 6. interrupt 第二轮
+    // 6. interrupt 第二轮（q2 进行中）→ turn/interrupt + 关 client → 合成 aborted
+    c.notify('turn/started', { turn: { id: 'turn-2', status: 'inProgress' } })
     await fetch(U + `/sessions/${sid}/interrupt`, { method: 'POST' })
-    children[1].emit('close', null, 'SIGTERM')
     await tick()
     expect(getSession(db, sid)).toMatchObject({ status: 'aborted' })
 
@@ -96,11 +90,11 @@ describe('M6 端到端会话生命周期', () => {
     await reader.cancel().catch(() => {})
   })
 
-  it('codex resume：首轮终结后再 submit → 第二进程 argv 含 resume <thread_id>', async () => {
+  it('codex resume：冷会话（带存档 resumable_id，如 daemon 重启后）submit → 走 thread/resume 续接同 thread', async () => {
+    // 首段 runtime：跑一轮拿到 thread_id 并落库（resumableId='th-1'），然后 server 退出（client close）模拟会话冷掉。
     const db = openDatabase(':memory:')
-    const calls: string[][] = []
-    const children: any[] = []
-    const runtime = new SessionRuntime({ db, resolveBin: () => '/bin', spawnFn: ((_bin: string, args: string[]) => { calls.push(args); const c = fakeChild(); children.push(c); return c }) as any })
+    const codex1 = fakeCodexClient()
+    const runtime = new SessionRuntime({ db, resolveBin: () => '/bin', codexClientFactory: codex1.factory })
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'as-e2e-'))
     server = await startDaemon({ detect: () => ({ claude: '/x', codex: '/x' }), db, runtime, projectsDir: tmp })
     const U = server.url
@@ -108,19 +102,25 @@ describe('M6 端到端会话生命周期', () => {
     const sess = await (await fetch(U + '/sessions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ projectId: proj.projectId, engine: 'codex', model: 'gpt-5' }) })).json() as { sessionId: string }
     const sid = sess.sessionId
 
-    // 首轮：submit → thread.started(th-r) → turn.completed → close（会话终结、归 idle）
+    // 首轮：submit → 起 server（thread/start，无 resume）→ turn/completed
     await fetch(U + `/sessions/${sid}/messages`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: 'q1' }) })
-    expect(calls[0]).not.toContain('resume')                  // 首轮无 resume
-    children[0].stdout.emit('data', JSON.stringify({ type: 'thread.started', thread_id: 'th-r' }) + '\n')
-    children[0].stdout.emit('data', JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }) + '\n')
-    children[0].emit('close', 0, null)
     await tick()
-    expect(getSession(db, sid)).toMatchObject({ status: 'completed', resumableId: 'th-r' })
+    const c1 = codex1.current()
+    expect(c1.requests.map((r) => r.method)).toEqual(['initialize', 'thread/start', 'turn/start'])   // 首轮无 resume
+    c1.notify('turn/started', { turn: { id: 'turn-1', status: 'inProgress' } })
+    c1.notify('turn/completed', { turn: { id: 'turn-1', status: 'completed' } })
+    await tick()
+    expect(getSession(db, sid)).toMatchObject({ status: 'completed', resumableId: 'th-1' })
+    // 模拟会话冷掉：底层 server 退出（client close → onExit → onDone 清 serverAlive）
+    c1.client.close()
+    await tick()
 
-    // 第二条：会话已 idle，submit → 用 resumable_id 起 resume 进程
+    // 冷态再 submit：serverAlive 已 false → startTurn 用存档的 resumable_id 起新 server，走 thread/resume 续接 'th-1'
     await fetch(U + `/sessions/${sid}/messages`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: 'q2' }) })
-    expect(calls).toHaveLength(2)
-    expect(calls[1]).toContain('resume')
-    expect(calls[1]).toContain('th-r')
+    await tick()
+    expect(codex1.instances.length).toBe(2)
+    const c2 = codex1.current()
+    expect(c2.requests.map((r) => r.method)).toEqual(['initialize', 'thread/resume', 'turn/start'])
+    expect((c2.requests[1].params as { threadId?: string }).threadId).toBe('th-1')
   })
 })

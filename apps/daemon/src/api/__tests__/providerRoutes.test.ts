@@ -5,12 +5,16 @@ import path from 'node:path'
 import { startDaemon, type DaemonServer } from '../../server'
 import { openDatabase } from '../../db/database'
 import { makeProviderStore } from '../../providers/store'
+import { makeAuthSourceStore } from '../../auth/sourceStore'
 
 let server: DaemonServer | null = null
 afterEach(async () => { if (server) await server.close(); server = null })
 
+// 这些路由用例不走密钥库引用，secrets 仅作占位（getValue 恒空）
+const fakeSecrets = { getValue: () => undefined }
 function tmpStore() {
-  return makeProviderStore(path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'pr-')), 'providers.json'))
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-'))
+  return makeProviderStore(path.join(d, 'providers.json'), fakeSecrets, makeAuthSourceStore(path.join(d, 'auth.json')), { get: () => undefined })
 }
 async function start() {
   const providers = tmpStore()

@@ -21,7 +21,54 @@ export const DESKTOP_IPC = {
   trashItem: 'agent-shell:trash-item',
   /** ipcRenderer.invoke：在系统文件管理器（Finder）中定位并选中某绝对路径（shell.showItemInFolder），返回 {ok,error}。 */
   showItemInFolder: 'agent-shell:show-item',
+  /** ipcRenderer.sendSync：查主进程当前已检测到的可用更新（UpdateState）或 null（无新版）。 */
+  updateState: 'agent-shell:update-state',
+  /** 主→渲染 push（webContents.send）：检测到新版时推 UpdateState，驱动右上角常驻图标。 */
+  updateAvailable: 'agent-shell:update-available',
+  /** ipcRenderer.send：renderer 请求主进程弹系统通知（Electron Notification）。载荷：ReminderNotify。 */
+  showReminder: 'agent-shell:show-reminder',
+  /** 主→渲染 push（webContents.send）：用户点击通知后激活对应项目/会话。载荷：ReminderActivate。 */
+  reminderActivate: 'agent-shell:reminder-activate',
+  /** ipcRenderer.invoke：检测本机已安装哪些编辑器，返回归一化列表（按平台过滤+排序）。 */
+  detectEditors: 'agent-shell:detect-editors',
+  /** ipcRenderer.invoke：用指定编辑器打开某绝对路径（项目根目录），返回 {ok,error}。 */
+  openInEditor: 'agent-shell:open-in-editor',
 } as const
+
+/** 可用更新信息：版本号 + 下载页地址（由主进程随检测结果下发，前端不另硬编码 URL）。 */
+export interface UpdateState {
+  version: string
+  releasesUrl: string
+}
+
+/** 「在编辑器中打开」下拉的一个条目（主进程检测后下发，渲染层只渲染）。 */
+export interface EditorEntry {
+  id: string
+  label: string
+  installed: boolean
+}
+
+// ── 提醒（Reminders）IPC 载荷 ──────────────────────────────────────
+/**
+ * 渲染进程 → 主进程（ipcRenderer.send）：renderer 请求主进程弹 Electron 系统通知。
+ * renderer 在 useAgentStream 回调中检测到 system 渠道后，经 preload 桥调用，主进程负责弹 Notification。
+ */
+export interface ReminderNotify {
+  projectId: string
+  sessionId: string
+  event: 'attention' | 'complete' | 'failed'
+  title: string
+  body: string
+}
+
+/**
+ * 用户点击通知 → 主进程 → 渲染进程：聚焦对应项目/会话。
+ * 预留给 T5（main/preload 实现），本任务仅加类型契约。
+ */
+export interface ReminderActivate {
+  projectId: string
+  sessionId: string
+}
 
 /** 宽门会话 token 的请求头名（小写，便于 Express req.header 大小写无关读取）。 */
 export const AUTH_HEADER = 'x-agent-shell-token'
@@ -49,4 +96,22 @@ export interface AgentShellBridge {
   trashItem: (absPaths: string[]) => Promise<{ ok: boolean; failed: string[] }>
   /** 在系统文件管理器（Finder）中定位并选中某绝对路径。ok=false 时 error 为系统错误信息。 */
   showItemInFolder: (absPath: string) => Promise<{ ok: boolean; error?: string }>
+  /** 同步查当前可用更新（无则 null）。挂载时主动拉一次，配合 onUpdateAvailable 防时序竞争。 */
+  getUpdateState: () => UpdateState | null
+  /** 订阅主进程「发现新版」推送，返回退订函数。 */
+  onUpdateAvailable: (cb: (s: UpdateState) => void) => () => void
+  /**
+   * 渲染 → 主进程（fire-and-forget）：renderer 请求主进程弹 Electron 系统通知（T5 实现）。
+   * preload 内调用 ipcRenderer.send(DESKTOP_IPC.showReminder, payload)。
+   */
+  showReminder: (payload: ReminderNotify) => void
+  /**
+   * 订阅主进程「通知被点击」推送（主 → 渲染 webContents.send）：返回退订函数（T5 实现）。
+   * 收到后 renderer 聚焦对应项目/会话（T8 接）。
+   */
+  onReminderActivate: (cb: (p: ReminderActivate) => void) => () => void
+  /** 检测本机已安装的编辑器（按当前平台过滤+排序）。无桌面壳则前端不会调用。 */
+  detectEditors: () => Promise<EditorEntry[]>
+  /** 用 id 对应编辑器打开绝对路径（项目根）。id 未命中/未安装 → ok=false。 */
+  openInEditor: (id: string, absPath: string) => Promise<{ ok: boolean; error?: string }>
 }

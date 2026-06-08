@@ -34,7 +34,7 @@ const isProjectRelative = (p: string): boolean => !p.startsWith('/') && !p.start
 
 interface ComposerProps {
   running: boolean
-  onSubmit: (text: string, contextFiles: string[]) => void
+  onSubmit: (text: string, contextFiles: string[], activeFile?: string | null) => void
   onInterrupt: () => void
   engine: 'claude' | 'codex'
   model: string
@@ -57,6 +57,17 @@ export function Composer({ running, onSubmit, onInterrupt, engine, model, projec
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const removeAttachment = useCallback((idx: number) => {
     setAttachments(prev => prev.filter((_, i) => i !== idx))
+  }, [])
+
+  // 当前文件「移出上下文」排除集（会话内、按路径）：从 CtxFile 上提到此处，让 send() 读得到
+  const [ctxExcluded, setCtxExcluded] = useState<Set<string>>(new Set())
+  const toggleExclude = useCallback((path: string) => {
+    setCtxExcluded(prev => {
+      const next = new Set(prev)
+      if (next.has(path)) next.delete(path)
+      else next.add(path)
+      return next
+    })
   }, [])
 
   // 回形针按钮：原生选择器拿绝对路径（文件/文件夹/多选）。
@@ -169,7 +180,9 @@ export function Composer({ running, onSubmit, onInterrupt, engine, model, projec
   const send = () => {
     const t = text.trim()
     if (!t && attachments.length === 0) return
-    onSubmit(t, attachments.map(a => a.path))
+    // 当前活动文件未被移出 → 作为「当前文件」独立信号随消息送出（只给路径）
+    const includeActive = activeFile && !ctxExcluded.has(activeFile) ? activeFile : null
+    onSubmit(t, attachments.map(a => a.path), includeActive)
     setText('')
     setAttachments([])
   }
@@ -216,6 +229,8 @@ export function Composer({ running, onSubmit, onInterrupt, engine, model, projec
           open={mention.open}
           items={mention.items}
           activeIndex={mention.activeIndex}
+          query={mention.query}
+          onFocusComposer={() => taRef.current?.focus()}
           onChoose={(idx) => {
             if (taRef.current) {
               const newVal = mention.choose(taRef.current, idx)
@@ -254,7 +269,11 @@ export function Composer({ running, onSubmit, onInterrupt, engine, model, projec
               <ModelPill sessionId={sessionId} projectId={projectId} commands={commands} onInsertCommand={insertCommand} onOpenCommands={loadCommands} />
             </div>
 
-            <CtxFile activeFile={activeFile ?? null} />
+            <CtxFile
+              activeFile={activeFile ?? null}
+              excluded={activeFile ? ctxExcluded.has(activeFile) : false}
+              onToggleExclude={toggleExclude}
+            />
           </div>
 
           <CtxMeter usage={usage} model={model} liveTokens={liveTokens} engine={engine} />

@@ -18,6 +18,7 @@ vi.mock('../../api/client', () => ({
     ] }),
     uploadPaste: vi.fn(),
     models: vi.fn().mockResolvedValue({ models: null }),
+    getConfig: vi.fn().mockResolvedValue({ projectsDir: '', skillsDir: '', modelAliases: {} }),
   },
 }))
 

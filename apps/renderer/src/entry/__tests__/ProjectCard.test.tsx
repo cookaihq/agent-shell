@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { vi } from 'vitest'
 import { ProjectCard } from '../ProjectCard'
 import type { ProjectDTO } from '../../api/types'
-const base: ProjectDTO = { id: 'p1', name: 'seed-pitch-deck', path: '/x', createdAt: Date.now() - 5 * 60_000, status: 'running', engine: 'claude' }
+const base: ProjectDTO = { id: 'p1', name: 'seed-pitch-deck', path: '/x', createdAt: Date.now() - 5 * 60_000, status: 'running', engine: 'claude', selectedAgent: null }
 
 test('渲染 glyph/名称/状态点 + 点击回调', async () => {
   const onOpen = vi.fn()

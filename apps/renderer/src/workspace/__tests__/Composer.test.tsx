@@ -10,6 +10,10 @@ import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { vi } from 'vitest'
 
+// SkillModal（注入选择器）现依赖 useSettings()（去配置链接）；workspace 单测不包 SettingsProvider，
+// mock useSettings 返回 no-op openSettings（运行时由 App.tsx 顶层 SettingsProvider 提供，此处镜像之）。
+vi.mock('../../settings/SettingsContext', async (orig) => ({ ...(await (orig() as Promise<object>)), useSettings: () => ({ openSettings: vi.fn() }) }))
+
 // Composer 内含 ModelPill/SkillModal，会调 api 拉文件/技能/命令/模型，并在「注入技能」完成时调 injectSkills。
 // mock 整个 client：覆盖渲染/交互路径触达的全部方法，断言 injectSkills 收到当前 projectId。
 vi.mock('../../api/client', () => ({
@@ -27,6 +31,8 @@ vi.mock('../../api/client', () => ({
     uploadPaste: vi.fn(),
     importFiles: vi.fn(),
     rawUrl: vi.fn(() => ''),
+    listProviders: vi.fn().mockResolvedValue({ engines: { claude: { active: 'default', providers: [] }, codex: { active: 'default', providers: [] } } }),
+    getConfig: vi.fn().mockResolvedValue({ projectsDir: '', skillsDir: '', modelAliases: {} }),
   },
 }))
 
@@ -37,7 +43,8 @@ import type { ReactNode } from 'react'
 import { api } from '../../api/client'
 
 function Wrapper({ children }: { children: ReactNode }) {
-  const [runtime, dispatch] = useReducer(runtimeReducer, undefined, () => initialRuntime('claude', 'Claude Opus 4.8'))
+  // 'default' 在 claude 静态表里，对齐后 label='Default (recommended)'，ModelPill aria-label 可按此查找
+  const [runtime, dispatch] = useReducer(runtimeReducer, undefined, () => initialRuntime('claude', 'default'))
   return (
     <RuntimeContext.Provider value={{ runtime, dispatch }}>
       {children}
@@ -63,7 +70,7 @@ test('Enter 发送并清空', async () => {
   )
   const ta = screen.getByRole('textbox')
   await userEvent.type(ta, '你好{Enter}')
-  expect(onSubmit).toHaveBeenCalledWith('你好', [])
+  expect(onSubmit).toHaveBeenCalledWith('你好', [], null)
   expect((ta as HTMLTextAreaElement).value).toBe('')
 })
 
@@ -126,7 +133,7 @@ test('回形针选图片 → 复制进 attachments/（拿相对路径）；非�
   expect(api.importFiles).toHaveBeenCalledWith('pj-1', ['/abs/photo.png'], 'attachments')
   // 发送：图片为相对路径 attachments/photo.png，非图片仍绝对路径
   await userEvent.type(screen.getByRole('textbox'), '看图{Enter}')
-  expect(onSubmit).toHaveBeenCalledWith('看图', ['attachments/photo.png', '/abs/notes.txt'])
+  expect(onSubmit).toHaveBeenCalledWith('看图', ['attachments/photo.png', '/abs/notes.txt'], null)
 })
 
 test('取数时机：mount 不取命令，打开 ModelPill 才取（按需）', async () => {

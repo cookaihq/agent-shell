@@ -95,6 +95,13 @@ export const IconCaret = ({ size = 13 }: SvgProps) => (
   </svg>
 )
 
+// 下载/有更新图标（下箭头入底线）——顶栏更新提示用
+export const IconDownload = ({ size = 16 }: SvgProps) => (
+  <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 3v12M8 11l4 4 4-4M5 21h14" />
+  </svg>
+)
+
 export const EngIcon = ({ engine }: { engine: 'claude' | 'codex' }) => {
   if (engine === 'claude') {
     return (

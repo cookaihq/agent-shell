@@ -18,7 +18,9 @@ export interface RunTurnOpts {
   addDirs?: string[]
   /** 引擎侧 resume 指针（codex thread_id / claude session_id）；有则起进程时拼 resume 旗标。 */
   resumableId?: string
-  creds?: ProviderCreds         // BYOK（V1 不传）
+  creds?: ProviderCreds         // Provider 直连（V1 不传）
+  /** 本次 run 激活技能解析出的 env（技能密钥）；省略=不注入。 */
+  skillEnv?: Record<string, string>
   baseEnv?: NodeJS.ProcessEnv   // 默认 process.env
   onEvent: (ev: AgentEvent) => void
   /** 嗅探到引擎侧 resume 指针（claude session_id / codex thread_id）时回调，每 turn 至多一次。 */
@@ -65,7 +67,7 @@ function failDetail(stderr: string, exitCode: number | null, spawnErr?: Error): 
 export function runTurn(opts: RunTurnOpts): RunTurnHandle {
   const def = getRuntimeDef(opts.engine)
   const buildOpts: BuildArgsOpts = { model: opts.model, permissionMode: opts.permissionMode, sandbox: opts.sandbox, resumableId: opts.resumableId, addDirs: opts.addDirs }
-  const env = sanitizeEnv(def.authStrategy, opts.baseEnv ?? process.env, opts.creds)
+  const env = sanitizeEnv(def.authStrategy, opts.baseEnv ?? process.env, opts.creds, opts.skillEnv)
   const spawnFn = opts.spawnFn ?? nodeSpawn
 
   const child = spawnFn(opts.binPath, def.buildArgs(buildOpts), {

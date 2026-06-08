@@ -5,11 +5,29 @@ import path from 'node:path'
 import { EventEmitter } from 'node:events'
 import { startDaemon, type DaemonServer } from '../../server'
 import { openDatabase } from '../../db/database'
-import { createProject, listProjects } from '../../db/projects'
-import { createSession } from '../../db/sessions'
+import { createProject, listProjects, getProject } from '../../db/projects'
+import { createSession, getSession } from '../../db/sessions'
 import { SessionRuntime } from '../../session/sessionRuntime'
 import { recordUsage } from '../../db/usage'
 import { appendRecord, readRecords } from '../../session/transcript'
+import { PatchSessionReq, PatchProjectReq } from '@agent-shell/contracts'
+
+// 契约层断言：PatchSessionReq schema 自校验
+describe('PatchSessionReq 契约', () => {
+  it('合法 engine（带 model）不抛', () => {
+    expect(() => PatchSessionReq.parse({ engine: 'codex', model: 'gpt-5.5' })).not.toThrow()
+    expect(() => PatchSessionReq.parse({ engine: 'claude', model: 'opus' })).not.toThrow()
+  })
+  it('非法 engine 失败', () => {
+    expect(PatchSessionReq.safeParse({ engine: 'gemini', model: 'x' }).success).toBe(false)
+  })
+  it('pinned/title 仍合法', () => {
+    expect(() => PatchSessionReq.parse({ pinned: true, title: '改名' })).not.toThrow()
+  })
+  it('全字段一起传合法', () => {
+    expect(() => PatchSessionReq.parse({ pinned: false, title: 'x', engine: 'claude', model: 'opus' })).not.toThrow()
+  })
+})
 
 let server: DaemonServer | null = null
 let tmp: string
@@ -193,6 +211,23 @@ describe('submit / interrupt / resume 端点', () => {
     })
     const list = (await (await fetch(server.url + `/projects/${proj.id}/sessions`)).json() as { sessions: any[] }).sessions
     expect(list.find((x) => x.id === s.id)).toMatchObject({ permissionMode: 'acceptEdits', effort: 'high' })
+  })
+
+  it('POST /sessions/:id/messages 带 codex sandbox/approval → 转发进 runtime.submit（Part A P3）', async () => {
+    const db = openDatabase(':memory:')
+    const proj = createProject(db, { name: 'p', path: '/w' })
+    const s = createSession(db, { projectId: proj.id, engine: 'codex', model: 'gpt-5' })
+    const runtime = new SessionRuntime({ db, resolveBin: () => '/bin', spawnFn: (() => makeFake()) as any, transcriptDir: fs.mkdtempSync(path.join(os.tmpdir(), 'as-tr-')) })
+    let captured: any
+    const orig = runtime.submit.bind(runtime)
+    runtime.submit = ((id: string, text: string, files: string[], rc: any) => { captured = rc; return orig(id, text, files, rc) }) as any
+    server = await startDaemon({ detect: () => ({ claude: '/x', codex: '/x' }), db, runtime, projectsDir: (tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'as-m6-'))) })
+    const res = await fetch(server.url + `/sessions/${s.id}/messages`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: '你好', sandbox: 'danger-full-access', approval: 'never' }),
+    })
+    expect(res.status).toBe(202)
+    expect(captured).toMatchObject({ sandbox: 'danger-full-access', approval: 'never' })
   })
 
   it('POST /sessions/:id/interrupt：202（空闲会话 no-op 也 202）', async () => {
@@ -429,6 +464,105 @@ describe('轻量写端点', () => {
     server = await startWith()
     expect((await fetch(server.url + '/sessions/nope', { method: 'DELETE' })).status).toBe(404)
   })
+
+  // Part B T2：session engine 变身守卫
+  it('PATCH /sessions/:id {engine,model} 空会话 → 200，engine+model 已改', async () => {
+    const db = openDatabase(':memory:')
+    const proj = createProject(db, { name: 'p', path: '/w' })
+    const s = createSession(db, { projectId: proj.id, engine: 'claude', model: 'opus' })
+    const tdir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-tr-'))
+    server = await startWith(db, tdir)
+    const res = await fetch(server.url + `/sessions/${s.id}`, {
+      method: 'PATCH', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ engine: 'codex', model: 'gpt-5.5' }),
+    })
+    expect(res.status).toBe(200)
+    const updated = getSession(db, s.id)!
+    expect(updated.engine).toBe('codex')
+    expect(updated.model).toBe('gpt-5.5')
+  })
+
+  // Part B T5a：变身重置引擎专属档案
+  it('PATCH /sessions/:id {engine,model} 变身 → 清空旧引擎档案（四权限列置 null）', async () => {
+    const db = openDatabase(':memory:')
+    const proj = createProject(db, { name: 'p', path: '/w' })
+    // 建会话时预置旧引擎档案（claude 引擎有 permissionMode/effort）
+    const s = createSession(db, {
+      projectId: proj.id, engine: 'claude', model: 'opus',
+      permissionMode: 'plan', effort: 'max', sandbox: 'danger-full-access', approval: 'never',
+    })
+    const tdir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-tr-'))
+    server = await startWith(db, tdir)
+    const res = await fetch(server.url + `/sessions/${s.id}`, {
+      method: 'PATCH', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ engine: 'codex', model: 'gpt-5.5' }),
+    })
+    expect(res.status).toBe(200)
+    const updated = getSession(db, s.id)!
+    expect(updated.engine).toBe('codex')
+    expect(updated.model).toBe('gpt-5.5')
+    // 旧引擎档案被清空
+    expect(updated.permissionMode).toBeNull()
+    expect(updated.effort).toBeNull()
+    expect(updated.sandbox).toBeNull()
+    expect(updated.approval).toBeNull()
+  })
+
+  // Part B T5a：PatchSessionReq refine——带 engine 必带 model（消除跨引擎脏态）
+  it('PatchSessionReq：{engine,model} 合法，{engine} 单独非法，无 engine 的改名/置顶仍合法', () => {
+    expect(PatchSessionReq.safeParse({ engine: 'codex', model: 'gpt-5.5' }).success).toBe(true)
+    expect(PatchSessionReq.safeParse({ engine: 'codex' }).success).toBe(false)   // engine 无 model → 非法
+    expect(PatchSessionReq.safeParse({ pinned: true }).success).toBe(true)        // 无 engine → 不受约束
+    expect(PatchSessionReq.safeParse({}).success).toBe(true)
+    expect(PatchSessionReq.parse({ engine: 'codex', model: 'gpt-5.5' })).toMatchObject({ engine: 'codex', model: 'gpt-5.5' })
+  })
+
+  // Part B T5a：路由层——带 engine 缺 model 被 refine 挡下（400），到不了 changeSessionEngine（不会留跨引擎脏态）
+  it('PATCH /sessions/:id {engine} 缺 model → 400 invalid_request，会话引擎/模型未改', async () => {
+    const db = openDatabase(':memory:')
+    const proj = createProject(db, { name: 'p', path: '/w' })
+    const s = createSession(db, { projectId: proj.id, engine: 'claude', model: 'opus' })
+    const tdir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-tr-'))
+    server = await startWith(db, tdir)
+    const res = await fetch(server.url + `/sessions/${s.id}`, {
+      method: 'PATCH', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ engine: 'codex' }),
+    })
+    expect(res.status).toBe(400)
+    expect((await res.json() as any).error.code).toBe('invalid_request')
+    const after = getSession(db, s.id)!
+    expect(after.engine).toBe('claude'); expect(after.model).toBe('opus')
+  })
+
+  it('PATCH /sessions/:id {engine,model} 已发送会话 → 409 conflict，engine 未改', async () => {
+    const db = openDatabase(':memory:')
+    const proj = createProject(db, { name: 'p', path: '/w' })
+    const s = createSession(db, { projectId: proj.id, engine: 'claude', model: 'opus' })
+    const tdir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-tr-'))
+    appendRecord(tdir, s.id, 'claude', 'user_prompt', { text: 'hi', attachments: [] })
+    server = await startWith(db, tdir)
+    const res = await fetch(server.url + `/sessions/${s.id}`, {
+      method: 'PATCH', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ engine: 'codex', model: 'gpt-5.5' }),
+    })
+    expect(res.status).toBe(409)
+    expect((await res.json() as any).error.code).toBe('conflict')
+    expect(getSession(db, s.id)!.engine).toBe('claude')
+  })
+
+  it('PATCH /sessions/:id {engine:"gemini"} → 400 invalid_request', async () => {
+    const db = openDatabase(':memory:')
+    const proj = createProject(db, { name: 'p', path: '/w' })
+    const s = createSession(db, { projectId: proj.id, engine: 'claude', model: 'opus' })
+    const tdir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-tr-'))
+    server = await startWith(db, tdir)
+    const res = await fetch(server.url + `/sessions/${s.id}`, {
+      method: 'PATCH', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ engine: 'gemini' }),
+    })
+    expect(res.status).toBe(400)
+    expect((await res.json() as any).error.code).toBe('invalid_request')
+  })
 })
 
 describe('技能注入', () => {
@@ -459,9 +593,10 @@ describe('GET /sessions/:id/stream (SSE)', () => {
     const db = openDatabase(':memory:')
     const proj = createProject(db, { name: 'p', path: '/w' })
     const s = createSession(db, { projectId: proj.id, engine: 'codex', model: 'gpt-5' })
-    const children: any[] = []
     const { SessionRuntime } = await import('../../session/sessionRuntime')
-    const runtime = new SessionRuntime({ db, resolveBin: () => '/bin', spawnFn: (() => { const c = makeFake(); children.push(c); return c }) as any, transcriptDir: fs.mkdtempSync(path.join(os.tmpdir(), 'as-tr-')) })
+    const { fakeCodexClient } = await import('../../runtimes/codex/__tests__/fakeCodexClient')
+    const codex = fakeCodexClient()
+    const runtime = new SessionRuntime({ db, resolveBin: () => '/bin', codexClientFactory: codex.factory, transcriptDir: fs.mkdtempSync(path.join(os.tmpdir(), 'as-tr-')) })
     server = await startDaemon({ detect: () => ({ claude: '/x', codex: '/x' }), db, runtime, projectsDir: (tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'as-m6-'))) })
 
     const ac = new AbortController()
@@ -469,8 +604,10 @@ describe('GET /sessions/:id/stream (SSE)', () => {
     expect(res.headers.get('content-type')).toContain('text/event-stream')
 
     await fetch(server.url + `/sessions/${s.id}/messages`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: 'hi' }) })
-    const cp = children[0]
-    cp.stdout.emit('data', JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: '答' } }) + '\n')
+    await new Promise((r) => setImmediate(r))   // 等 boot 链跑完
+    const c = codex.current()
+    c.notify('turn/started', { turn: { id: 'turn-1', status: 'inProgress' } })
+    c.notify('item/completed', { item: { type: 'agentMessage', id: 'msg-1', text: '答' } })
 
     const reader = res.body!.getReader()
     const decoder = new TextDecoder()
@@ -485,6 +622,71 @@ describe('GET /sessions/:id/stream (SSE)', () => {
     expect(collected).toContain('"text":"答"')
     ac.abort()
     await reader.cancel().catch(() => {})
+  })
+})
+
+// Part B T3：project PATCH selectedAgent
+describe('PatchProjectReq 契约', () => {
+  it('合法 selectedAgent 不抛', () => {
+    expect(PatchProjectReq.safeParse({ selectedAgent: 'codex' }).success).toBe(true)
+    expect(PatchProjectReq.safeParse({ selectedAgent: 'claude' }).success).toBe(true)
+  })
+  it('非法 selectedAgent 失败', () => {
+    expect(PatchProjectReq.safeParse({ selectedAgent: 'gemini' }).success).toBe(false)
+  })
+  it('全省略也合法（selectedAgent 可选）', () => {
+    expect(PatchProjectReq.safeParse({}).success).toBe(true)
+  })
+})
+
+describe('PATCH /projects/:id（selectedAgent）', () => {
+  it('PATCH selectedAgent:codex → 200，getProject 回填 selectedAgent', async () => {
+    const db = openDatabase(':memory:')
+    const proj = createProject(db, { name: 'p', path: '/w' })
+    server = await startWith(db)
+    const res = await fetch(server.url + `/projects/${proj.id}`, {
+      method: 'PATCH', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ selectedAgent: 'codex' }),
+    })
+    expect(res.status).toBe(200)
+    expect((await res.json() as any).ok).toBe(true)
+    expect(getProject(db, proj.id)!.selectedAgent).toBe('codex')
+  })
+
+  it('PATCH selectedAgent 非法值 → 400 invalid_request', async () => {
+    const db = openDatabase(':memory:')
+    const proj = createProject(db, { name: 'p', path: '/w' })
+    server = await startWith(db)
+    const res = await fetch(server.url + `/projects/${proj.id}`, {
+      method: 'PATCH', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ selectedAgent: 'gemini' }),
+    })
+    expect(res.status).toBe(400)
+    expect((await res.json() as any).error.code).toBe('invalid_request')
+  })
+
+  it('PATCH 项目不存在 → 404 not_found', async () => {
+    server = await startWith()
+    const res = await fetch(server.url + '/projects/nope', {
+      method: 'PATCH', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ selectedAgent: 'codex' }),
+    })
+    expect(res.status).toBe(404)
+    expect((await res.json() as any).error.code).toBe('not_found')
+  })
+
+  // partial-update 语义：空 body = no-op（selectedAgent 省略不动原值），不报错也不清空已选。
+  it('PATCH 空 body {} → 200，selectedAgent 保持建项目时的值（no-op）', async () => {
+    const db = openDatabase(':memory:')
+    const proj = createProject(db, { name: 'p', path: '/w', selectedAgent: 'codex' })
+    server = await startWith(db)
+    const res = await fetch(server.url + `/projects/${proj.id}`, {
+      method: 'PATCH', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({}),
+    })
+    expect(res.status).toBe(200)
+    expect((await res.json() as any).ok).toBe(true)
+    expect(getProject(db, proj.id)!.selectedAgent).toBe('codex')
   })
 })
 

@@ -38,15 +38,17 @@ console.log(`[rebuild-sqlite] better-sqlite3 → Electron ${target} (${process.p
 
 try {
   // 首选：拉官方 Electron 预编译（快、无需编译器）。
+  // shell:true：Windows 上 npx 实为 npx.cmd，execFileSync 不经 shell 无法 spawn 裸 'npx'（会 ENOENT）；
+  // target/arch 来自 package.json electron 版本与 process.arch，无 shell 元字符，拼接安全。
   execFileSync('npx', ['prebuild-install', '--runtime', 'electron', '--target', target, '--arch', arch], {
-    cwd: moduleDir, stdio: 'inherit',
+    cwd: moduleDir, stdio: 'inherit', shell: true,
   })
   console.log('[rebuild-sqlite] 用 Electron 预编译包完成 ✓')
 } catch {
   // 回退：本地对 Electron 头文件编译（需 C++ 工具链）。
   console.log('[rebuild-sqlite] 无预编译包，回退 node-gyp 本地编译…')
   execFileSync('npx', ['node-gyp', 'rebuild', `--target=${target}`, `--arch=${arch}`, '--dist-url=https://electronjs.org/headers'], {
-    cwd: moduleDir, stdio: 'inherit',
+    cwd: moduleDir, stdio: 'inherit', shell: true,
   })
   console.log('[rebuild-sqlite] node-gyp 本地编译完成 ✓')
 }

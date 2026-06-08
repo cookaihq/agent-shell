@@ -25,10 +25,14 @@ test('claude accept: 未知/坏帧丢弃（safeParse 失败）', () => {
   expect(claudeAccept.safeParse({ foo: 1 }).success).toBe(false)
 })
 
-test('codex accept（仅共享）：permission 类不通过，但 turn_start / message 通过', () => {
+test('codex accept（共享 ∪ codex 切片）：codex_subagent 通过，permission 类不通过，turn_start/message 通过', () => {
   const codexSchema = getSlice('codex').eventSchema
-  expect(codexSchema).toBeUndefined()
-  const codexAccept = SharedLifecycleEvent
+  expect(codexSchema).toBeDefined()
+  const codexAccept = z.union([SharedLifecycleEvent, codexSchema!])
+  // codex 私有事件（多 thread 子代理 fanout）必须通过——否则 useAgentStream safeParse 丢弃，形态 A/B/C 无数据。
+  expect(codexAccept.safeParse({ type: 'codex_subagent', phase: 'spawned', threadId: 't' }).success).toBe(true)
+  expect(codexAccept.safeParse({ type: 'codex_subagent', phase: 'wait', threadId: 't', waiting: true }).success).toBe(true)
+  // codex 当前不走 claude 的 permission 回路 → permission_request 仍不通过（codex 私有 schema 只含 CodexSubagentEvent）。
   expect(codexAccept.safeParse({ type: 'permission_request', requestId: 'r', toolName: 'Write', input: {} }).success).toBe(false)
   expect(codexAccept.safeParse({ type: 'turn_start' }).success).toBe(true)
   expect(codexAccept.safeParse({ type: 'message', text: 'hi' }).success).toBe(true)

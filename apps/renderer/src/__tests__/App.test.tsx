@@ -14,7 +14,7 @@ vi.mock('../api/client', () => ({
   ApiError: class extends Error {},
   api: {
     engines: vi.fn().mockResolvedValue({ engines: { claude: '/usr/bin/claude', codex: null } }),
-    listProjects: vi.fn().mockResolvedValue({ projects: [{ id: 'p1', name: 'TestProject', path: '/p', createdAt: 0, status: 'idle', engine: 'claude' }] }),
+    listProjects: vi.fn().mockResolvedValue({ projects: [{ id: 'p1', name: 'TestProject', path: '/p', createdAt: 0, status: 'idle', engine: 'claude', selectedAgent: null }] }),
     listSessions: vi.fn().mockResolvedValue({ sessions: [{ id: 's1', projectId: 'p1', engine: 'claude', model: 'opus', title: 'TestSession', pinned: false, status: 'idle', resumableId: null, createdAt: 0 }] }),
     messages: vi.fn().mockResolvedValue({ records: [] }),
     status: vi.fn().mockResolvedValue({ running: false, status: 'idle' }),
@@ -28,6 +28,7 @@ vi.mock('../api/client', () => ({
     interrupt: vi.fn(),
     submit: vi.fn(),
     getConfig: vi.fn().mockResolvedValue({ projectsDir: '/p', skillsDir: '/s' }),
+    listProviders: vi.fn().mockResolvedValue({ engines: { claude: { active: 'default', providers: [] }, codex: { active: 'default', providers: [] } } }),
   },
 }))
 

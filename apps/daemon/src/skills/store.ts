@@ -5,7 +5,7 @@ import type { Skill } from '@agent-shell/contracts'
 import { parseSkillFrontmatter } from './frontmatter'
 
 export class SkillError extends Error {
-  constructor(public reason: 'no_skill_md' | 'invalid_url' | 'exists' | 'not_found' | 'not_git' | 'git_failed', message: string) {
+  constructor(public reason: 'no_skill_md' | 'invalid_url' | 'exists' | 'not_found' | 'not_git' | 'git_failed' | 'forbidden', message: string) {
     super(message); this.name = 'SkillError'
   }
 }

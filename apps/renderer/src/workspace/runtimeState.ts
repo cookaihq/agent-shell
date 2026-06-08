@@ -96,7 +96,7 @@ function recall(bag: SavedProviderState, field: string, engine: Engine): string 
 
 // ── initialRuntime ────────────────────────────────────────────────────────────
 // 档位来源优先级（Issue 13/29）：会话已存的 init（DB 回填）> localStorage 上次使用 > 写死默认。
-// model 走回退：不在当前 agent 列表则回退列表首个。
+// model 信任传入值（会话 DB/种子）；仅空时回落 saved / 静态首项（P2: 自定义 Provider model 不被静态表洗掉）。
 
 /** 打开会话时回填的会话级档位（来自 DB sessions 表）。 */
 export interface RuntimeInit { permissionMode?: string | null; effort?: string | null }
@@ -106,7 +106,9 @@ export function initialRuntime(engine: Engine, model: string, init?: RuntimeInit
   const def = defaultSlots(engine)
   const values = modelValues(engine)
   const savedModel = recall(bag, 'model', engine)
-  const wantModel = values.includes(model) ? model : (savedModel && values.includes(savedModel) ? savedModel : (values[0] ?? model))
+  // 传入 model 来自会话 DB（已发送会话真实 model）或新建种子（active provider defaultModel）——一律信任，
+  // 不被静态表洗掉（否则自定义 Provider 的模型在打开会话时丢失，P2）。空才回落 saved / 静态首项。
+  const wantModel = model || savedModel || (values[0] ?? '')
 
   // 会话存的 permissionMode/effort 反映本会话真实配置（最高优先）；否则投影 bag；否则默认。
   const permissionMode = init?.permissionMode ?? recall(bag, 'permissionMode', engine) ?? def.permissionMode

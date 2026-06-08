@@ -11,6 +11,8 @@ v1-*.png
 
 # 本地配置
 .claude/settings.local.json
+# 定时任务运行时锁（transient，进程持有，非源码）
+.claude/scheduled_tasks.lock
 .env
 
 # 依赖与构建产物
