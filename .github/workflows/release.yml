@@ -43,7 +43,18 @@ jobs:
           python-version: '3.11'
 
       # Windows 上 better-sqlite3 无预编译二进制，node-gyp 从源码编译（runner 预装 VS Build Tools）。
-      - run: pnpm install --frozen-lockfile
+      # 重试 3 次：electron postinstall 要从 GitHub Releases/CDN 下载二进制，偶发 504 Gateway Time-out
+      # 等瞬时网络错误会让整步挂、release 发不出（v0.1.2 首试即因 electron 下载 504 失败）。shell:bash 在
+      # mac/win runner 都可用（win 走 git-bash），让重试循环跨平台一致。
+      - name: Install deps（重试瞬时网络失败）
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            echo "== pnpm install 尝试 $attempt =="
+            pnpm install --frozen-lockfile && exit 0
+            echo "install 失败，15s 后重试…"; sleep 15
+          done
+          echo "pnpm install 连续 3 次失败"; exit 1
 
       - run: pnpm -C apps/renderer run build
 
