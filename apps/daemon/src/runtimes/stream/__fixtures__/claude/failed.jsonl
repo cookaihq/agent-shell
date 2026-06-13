@@ -1,1 +1,0 @@
-{"type":"result","subtype":"success","is_error":true,"api_error_status":404,"stop_reason":"stop_sequence","result":"There's an issue with the selected model. It may not exist or you may not have access to it.","usage":{"input_tokens":0,"output_tokens":0}}

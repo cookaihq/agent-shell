@@ -1,6 +1,0 @@
-{"type": "thread.started", "thread_id": "019e8149-dba0-7353-821e-a25f051fad3f"}
-{"type": "turn.started"}
-{"type": "item.started", "item": {"id": "item_0", "type": "command_execution", "command": "/bin/zsh -lc 'echo hi-from-codex'", "aggregated_output": "", "exit_code": null, "status": "in_progress"}}
-{"type": "item.completed", "item": {"id": "item_0", "type": "command_execution", "command": "/bin/zsh -lc 'echo hi-from-codex'", "aggregated_output": "hi-from-codex\n", "exit_code": 0, "status": "completed"}}
-{"type": "item.completed", "item": {"id": "item_1", "type": "agent_message", "text": "hi-from-codex"}}
-{"type": "turn.completed", "usage": {"input_tokens": 41489, "cached_input_tokens": 11008, "output_tokens": 466, "reasoning_output_tokens": 332}}
