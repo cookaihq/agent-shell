@@ -79,6 +79,19 @@
 
 源代码即将开放，敬请期待。当前先提供免费安装包，欢迎在 [Issues](https://github.com/cookaihq/agent-shell/issues) 反馈问题与建议。
 
+## 灵感来源
+
+Agent Shell 的设计与实现，受到下面这些优秀项目的启发：
+
+- **[open-design](https://github.com/nexu-io/open-design)** —— 桌面端 sidecar 进程通信、流式消费等工程范式。
+- **[AionUi](https://github.com/iOfficeAI/AionUi)** —— 统一驾驭多种 CLI Agent 的本地优先「Cowork」桌面应用。
+- **[CodePilot](https://github.com/op7418/CodePilot)** —— 多模型 AI Agent 桌面客户端，支持 MCP / 技能与手机远程接管。
+- **[Conductor](https://www.conductor.build/)** —— 在 Mac 上用独立 git worktree 并行跑多个编码 Agent 的桌面应用。
+- **[Raft](https://raft.build/)** —— 人与 AI Agent 在共享聊天空间协作、Agent 跑在你自己机器上的平台。
+- **[Claudian](https://github.com/YishenTu/claudian)** —— 把 Claude Code / Codex 嵌进 Obsidian 的 AI 协作插件。
+- **[OpenClaw](https://github.com/openclaw/openclaw)** —— 开源的个人 AI Agent 运行时与框架。
+- **[Hermes](https://github.com/NousResearch/hermes-agent)** —— Nous Research 开源、带持久记忆的 AI Agent 平台。
+
 ## 许可证
 
 [GNU Affero General Public License v3.0](./LICENSE)（AGPL-3.0）。
