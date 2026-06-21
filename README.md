@@ -15,7 +15,7 @@
 
 ## 下载安装
 
-各平台安装包见 [Releases](https://github.com/cookaihq/agent-shell/releases)。
+各平台安装包见 [Releases](https://github.com/cookaihq/agent-shell/releases)，历次版本的功能变化见 [更新日志（CHANGELOG）](./CHANGELOG.md)。
 
 > **macOS**：安装包未做苹果签名，首次打开时右键点图标 →「打开」即可绕过系统拦截（只需一次）。
 
