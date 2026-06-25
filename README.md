@@ -91,6 +91,7 @@ Agent Shell 的设计与实现，受到下面这些优秀项目的启发：
 - **[Claudian](https://github.com/YishenTu/claudian)** —— 把 Claude Code / Codex 嵌进 Obsidian 的 AI 协作插件。
 - **[OpenClaw](https://github.com/openclaw/openclaw)** —— 开源的个人 AI Agent 运行时与框架。
 - **[Hermes](https://github.com/NousResearch/hermes-agent)** —— Nous Research 开源、带持久记忆的 AI Agent 平台。
+- **[Odysseus](https://github.com/pewdiepie-archdaemon/odysseus)** —— 本地优先、隐私优先、无遥测的自托管 AI 工作空间，集聊天 / Agent / 深度研究 / 文档 / 邮件于一体。
 
 ## 许可证
 
